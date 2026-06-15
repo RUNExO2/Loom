@@ -60,6 +60,27 @@ interface FGNode { id: string; title: string; item_type: string; x: number; y: n
 interface FGEdge { source: string; target: string; }
 interface GraphPhysics { repulsion: number; attraction: number; gravity: number; }
 
+// Resolve a CSS custom property off :root, with a fallback. Re-read live so the graph
+// tracks theme changes (incl. the custom-theme live preview) without a remount.
+function readGraphColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (k: string, fb: string) => (cs.getPropertyValue(k).trim() || fb);
+  return {
+    edge: v("--graph-edge", v("--border-strong", "rgba(120,120,120,0.4)")),
+    edgeHi: v("--graph-edge-active", v("--accent", "#6366f1")),
+    label: v("--graph-label", v("--text", "#1c1c1c")),
+    halo: v("--surface-1", "#ffffff"),
+    muted: v("--text-faint", "#8a8a8a"),
+    types: {
+      note: v("--h-notes", "#a78bfa"), task: v("--h-tasks", "#f97316"),
+      project: v("--h-projects", "#22c55e"), habit: v("--h-habits", "#ec4899"),
+      calendar: v("--h-calendar", "#3b82f6"), bookmark: v("--h-bookmarks", "#eab308"),
+      library: v("--h-library", "#f43f5e"), file: v("--h-files", "#64748b"),
+      vault: v("--h-vault", "#14b8a6"), automation: v("--h-automation", "#8b5cf6"),
+    } as Record<string, string>,
+  };
+}
+
 function ForceGraphCanvas({
   nodes,
   edges,
@@ -72,80 +93,172 @@ function ForceGraphCanvas({
   onNodeClick: (id: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
   const nodesRef = useRef<FGNode[]>([]);
   const rafRef = useRef<number>(0);
   const tickRef = useRef(0);
-  const MAX_TICKS = 500;
+  const MAX_TICKS = 600;
+  const NODE_R = 18;
   const panRef = useRef({ x: 0, y: 0 });
   const scaleRef = useRef(1);
-  const dragging = useRef<{ nodeId: string | null; mx: number; my: number; startX: number; startY: number }>({ nodeId: null, mx: 0, my: 0, startX: 0, startY: 0 });
+  const sizeRef = useRef({ w: 800, h: 600, dpr: 1 });
+  const hoverRef = useRef<string | null>(null);
+  const dirtyRef = useRef(true); // only repaint when something changed (idle-friendly)
+  const dragging = useRef<{ nodeId: string | null; mx: number; my: number; startX: number; startY: number; moved: boolean }>({ nodeId: null, mx: 0, my: 0, startX: 0, startY: 0, moved: false });
   const panning = useRef<{ active: boolean; sx: number; sy: number; px: number; py: number }>({ active: false, sx: 0, sy: 0, px: 0, py: 0 });
+
+  // Frame all nodes within the viewport with padding. Called during the initial
+  // settle and on resize so the graph is never off-screen or clamped to an edge.
+  const fitView = useCallback(() => {
+    const ns = nodesRef.current;
+    const { w, h } = sizeRef.current;
+    if (ns.length === 0) { panRef.current = { x: w / 2, y: h / 2 }; scaleRef.current = 1; return; }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of ns) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); }
+    const pad = 90;
+    const gw = (maxX - minX) || 1, gh = (maxY - minY) || 1;
+    const s = Math.max(0.2, Math.min((w - pad * 2) / gw, (h - pad * 2) / gh, 1.4));
+    scaleRef.current = s;
+    panRef.current = { x: w / 2 - ((minX + maxX) / 2) * s, y: h / 2 - ((minY + maxY) / 2) * s };
+    dirtyRef.current = true;
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const W = canvas.parentElement?.clientWidth || 800;
-    const H = canvas.parentElement?.clientHeight || 600;
-    canvas.width = W;
-    canvas.height = H;
-    panRef.current = { x: 0, y: 0 };
-    scaleRef.current = 1;
-    tickRef.current = 0;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap) return;
 
+    let colors = readGraphColors();
+
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = wrap.clientWidth || 800;
+      const h = wrap.clientHeight || 600;
+      sizeRef.current = { w, h, dpr };
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      canvas.style.width = w + "px";
+      canvas.style.height = h + "px";
+      dirtyRef.current = true;
+    };
+    resize();
+
+    // Seed positions on a ring around the world origin; gravity + fitView do the rest.
+    tickRef.current = 0;
+    const spread = Math.max(180, nodes.length * 11);
     nodesRef.current = nodes.map((n, i) => {
       const angle = (i / Math.max(nodes.length, 1)) * 2 * Math.PI;
-      const r = Math.min(W, H) * 0.35;
-      return { ...n, x: W / 2 + r * Math.cos(angle), y: H / 2 + r * Math.sin(angle), vx: 0, vy: 0 };
+      return { ...n, x: Math.cos(angle) * spread, y: Math.sin(angle) * spread, vx: 0, vy: 0 };
     });
+    fitView();
 
-    const NODE_R = 20;
-    const edgeMap = new Map<string, string[]>();
+    const edgeMap = new Map<string, Set<string>>();
     edges.forEach(e => {
-      if (!edgeMap.has(e.source)) edgeMap.set(e.source, []);
-      edgeMap.get(e.source)!.push(e.target);
+      if (!edgeMap.has(e.source)) edgeMap.set(e.source, new Set());
+      if (!edgeMap.has(e.target)) edgeMap.set(e.target, new Set());
+      edgeMap.get(e.source)!.add(e.target);
+      edgeMap.get(e.target)!.add(e.source);
     });
+    const nodeIndex = new Map<string, FGNode>();
 
     const physicsStep = () => {
-      const nodes = nodesRef.current;
-      const rep = physics.repulsion;
-      const att = physics.attraction;
-      const grav = physics.gravity;
-      const cx = W / 2, cy = H / 2;
+      const ns = nodesRef.current;
+      nodeIndex.clear();
+      for (const n of ns) nodeIndex.set(n.id, n);
+      const rep = physics.repulsion, att = physics.attraction, grav = physics.gravity;
       const damping = 0.85;
-      const dt = 1;
-
-      for (let i = 0; i < nodes.length; i++) {
-        let fx = 0, fy = 0;
-        fx += (cx - nodes[i].x) * grav;
-        fy += (cy - nodes[i].y) * grav;
-        for (let j = 0; j < nodes.length; j++) {
+      for (let i = 0; i < ns.length; i++) {
+        if (dragging.current.nodeId === ns[i].id) continue; // pinned while dragged
+        let fx = -ns[i].x * grav, fy = -ns[i].y * grav; // gravity toward world origin
+        for (let j = 0; j < ns.length; j++) {
           if (i === j) continue;
-          const dx = nodes[i].x - nodes[j].x;
-          const dy = nodes[i].y - nodes[j].y;
+          const dx = ns[i].x - ns[j].x, dy = ns[i].y - ns[j].y;
           const d2 = dx * dx + dy * dy + 1;
           const d = Math.sqrt(d2);
           fx += (dx / d) * rep / d2 * 1000;
           fy += (dy / d) * rep / d2 * 1000;
         }
-        const neighbors = edgeMap.get(nodes[i].id) || [];
-        neighbors.forEach(tid => {
-          const t = nodes.find(n => n.id === tid);
+        const neighbors = edgeMap.get(ns[i].id);
+        if (neighbors) neighbors.forEach(tid => {
+          const t = nodeIndex.get(tid);
           if (!t) return;
-          const dx = t.x - nodes[i].x;
-          const dy = t.y - nodes[i].y;
+          const dx = t.x - ns[i].x, dy = t.y - ns[i].y;
           const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-          const rest = 100;
-          const stretch = d - rest;
+          const stretch = d - 110;
           fx += dx / d * stretch * att * 0.5;
           fy += dy / d * stretch * att * 0.5;
         });
-        nodes[i].vx = (nodes[i].vx + fx * dt) * damping;
-        nodes[i].vy = (nodes[i].vy + fy * dt) * damping;
-        nodes[i].x += nodes[i].vx * dt;
-        nodes[i].y += nodes[i].vy * dt;
-        nodes[i].x = Math.max(NODE_R, Math.min(W - NODE_R, nodes[i].x));
-        nodes[i].y = Math.max(NODE_R, Math.min(H - NODE_R, nodes[i].y));
+        ns[i].vx = (ns[i].vx + fx) * damping;
+        ns[i].vy = (ns[i].vy + fy) * damping;
+        ns[i].x += ns[i].vx;
+        ns[i].y += ns[i].vy;
       }
+    };
+
+    const draw = () => {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const { w, h, dpr } = sizeRef.current;
+      const scale = scaleRef.current;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.translate(panRef.current.x, panRef.current.y);
+      ctx.scale(scale, scale);
+
+      const hovered = hoverRef.current;
+      const hl = hovered ? (edgeMap.get(hovered) || new Set<string>()) : null;
+
+      // Edges — highlight those touching the hovered node, dim the rest.
+      edges.forEach(e => {
+        const s = nodeIndex.get(e.source) || nodesRef.current.find(n => n.id === e.source);
+        const t = nodeIndex.get(e.target) || nodesRef.current.find(n => n.id === e.target);
+        if (!s || !t) return;
+        const active = hovered && (e.source === hovered || e.target === hovered);
+        ctx.strokeStyle = active ? colors.edgeHi : colors.edge;
+        ctx.lineWidth = (active ? 2 : 1.1) / scale;
+        ctx.globalAlpha = hovered && !active ? 0.35 : 1;
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(t.x, t.y);
+        ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
+
+      // Labels are legible only when zoomed in enough, or for the hovered node and its
+      // neighbours — this keeps large graphs from turning into a wall of text.
+      const showLabels = scale > 0.55;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      nodesRef.current.forEach(n => {
+        const color = colors.types[n.item_type] || colors.muted;
+        const isHover = n.id === hovered;
+        const isNeighbor = hl?.has(n.id);
+        const r = isHover ? NODE_R + 3 : NODE_R;
+        const dim = hovered && !isHover && !isNeighbor;
+        ctx.globalAlpha = dim ? 0.4 : 1;
+
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = color + (isHover ? "55" : "33");
+        ctx.fill();
+        ctx.lineWidth = (isHover ? 2.5 : 1.6) / scale;
+        ctx.strokeStyle = color;
+        ctx.stroke();
+
+        if (showLabels || isHover || isNeighbor) {
+          const label = n.title.length > 18 ? n.title.slice(0, 17) + "…" : n.title;
+          ctx.font = `${isHover ? 600 : 400} 12px ui-sans-serif, system-ui, sans-serif`;
+          // Halo for contrast against edges/nodes regardless of theme.
+          ctx.lineWidth = 3 / scale;
+          ctx.strokeStyle = colors.halo;
+          ctx.lineJoin = "round";
+          ctx.strokeText(label, n.x, n.y + r + 11);
+          ctx.fillStyle = colors.label;
+          ctx.fillText(label, n.x, n.y + r + 11);
+        }
+        ctx.globalAlpha = 1;
+      });
     };
 
     let alive = true;
@@ -154,84 +267,51 @@ function ForceGraphCanvas({
       if (tickRef.current < MAX_TICKS) {
         physicsStep();
         tickRef.current++;
+        dirtyRef.current = true;
+        // Reframe a few times early while the layout is still expanding.
+        if (tickRef.current < 160 && tickRef.current % 40 === 0) fitView();
       }
-      draw();
+      if (dirtyRef.current) { draw(); dirtyRef.current = false; }
       rafRef.current = requestAnimationFrame(loop);
     };
-
-    const TYPE_COLORS: Record<string, string> = {
-      note: "#a78bfa", task: "#f97316", project: "#22c55e", habit: "#ec4899",
-      calendar: "#3b82f6", bookmark: "#eab308", library: "#f43f5e", file: "#64748b",
-    };
-
-    const draw = () => {
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.clearRect(0, 0, W, H);
-      ctx.save();
-      ctx.translate(panRef.current.x, panRef.current.y);
-      ctx.scale(scaleRef.current, scaleRef.current);
-
-      // edges
-      ctx.strokeStyle = "rgba(255,255,255,0.08)";
-      ctx.lineWidth = 1;
-      edges.forEach(e => {
-        const s = nodesRef.current.find(n => n.id === e.source);
-        const t = nodesRef.current.find(n => n.id === e.target);
-        if (!s || !t) return;
-        ctx.beginPath();
-        ctx.moveTo(s.x, s.y);
-        ctx.lineTo(t.x, t.y);
-        ctx.stroke();
-      });
-
-      // nodes
-      nodesRef.current.forEach(n => {
-        const color = TYPE_COLORS[n.item_type] || "#6b7280";
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, NODE_R, 0, Math.PI * 2);
-        ctx.fillStyle = color + "33";
-        ctx.fill();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        // label
-        ctx.fillStyle = "rgba(255,255,255,0.8)";
-        ctx.font = "10px sans-serif";
-        ctx.textAlign = "center";
-        const label = n.title.length > 12 ? n.title.slice(0, 11) + "…" : n.title;
-        ctx.fillText(label, n.x, n.y + 3);
-      });
-      ctx.restore();
-    };
-
     rafRef.current = requestAnimationFrame(loop);
-    return () => { alive = false; cancelAnimationFrame(rafRef.current); };
+
+    const ro = new ResizeObserver(() => { resize(); fitView(); });
+    ro.observe(wrap);
+    // Track theme changes so colours stay correct without a remount.
+    const mo = new MutationObserver(() => { colors = readGraphColors(); dirtyRef.current = true; });
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+
+    return () => { alive = false; cancelAnimationFrame(rafRef.current); ro.disconnect(); mo.disconnect(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes.length, edges.length, physics.repulsion, physics.attraction, physics.gravity]);
+  }, [nodes, edges, physics.repulsion, physics.attraction, physics.gravity, fitView]);
 
   const worldPos = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    const cx = (clientX - rect.left - panRef.current.x) / scaleRef.current;
-    const cy = (clientY - rect.top - panRef.current.y) / scaleRef.current;
-    return { x: cx, y: cy };
+    return {
+      x: (clientX - rect.left - panRef.current.x) / scaleRef.current,
+      y: (clientY - rect.top - panRef.current.y) / scaleRef.current,
+    };
   }, []);
 
   const hitTest = useCallback((wx: number, wy: number) => {
-    return nodesRef.current.find(n => {
-      const dx = n.x - wx, dy = n.y - wy;
-      return Math.sqrt(dx * dx + dy * dy) < 22;
-    }) ?? null;
+    // Iterate last-drawn-first so the topmost node wins.
+    const ns = nodesRef.current;
+    for (let i = ns.length - 1; i >= 0; i--) {
+      const dx = ns[i].x - wx, dy = ns[i].y - wy;
+      if (dx * dx + dy * dy < (NODE_R + 4) * (NODE_R + 4)) return ns[i];
+    }
+    return null;
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button === 1 || e.altKey) return;
+    if (e.button === 1) return;
     const { x, y } = worldPos(e.clientX, e.clientY);
     const hit = hitTest(x, y);
     if (hit) {
-      dragging.current = { nodeId: hit.id, mx: x - hit.x, my: y - hit.y, startX: e.clientX, startY: e.clientY };
+      dragging.current = { nodeId: hit.id, mx: x - hit.x, my: y - hit.y, startX: e.clientX, startY: e.clientY, moved: false };
     } else {
       panning.current = { active: true, sx: e.clientX, sy: e.clientY, px: panRef.current.x, py: panRef.current.y };
     }
@@ -242,51 +322,72 @@ function ForceGraphCanvas({
       const { x, y } = worldPos(e.clientX, e.clientY);
       const node = nodesRef.current.find(n => n.id === dragging.current.nodeId);
       if (node) { node.x = x - dragging.current.mx; node.y = y - dragging.current.my; node.vx = 0; node.vy = 0; }
-      // Restart sim briefly so neighbors respond
-      if (tickRef.current >= MAX_TICKS) {
-        tickRef.current = MAX_TICKS - 60;
-      }
+      dragging.current.moved = true;
+      if (tickRef.current >= MAX_TICKS) tickRef.current = MAX_TICKS - 80; // nudge neighbours
+      dirtyRef.current = true;
     } else if (panning.current.active) {
       panRef.current.x = panning.current.px + (e.clientX - panning.current.sx);
       panRef.current.y = panning.current.py + (e.clientY - panning.current.sy);
+      dirtyRef.current = true;
+    } else {
+      const { x, y } = worldPos(e.clientX, e.clientY);
+      const hit = hitTest(x, y);
+      const id = hit ? hit.id : null;
+      if (id !== hoverRef.current) { hoverRef.current = id; dirtyRef.current = true; }
+      const canvas = canvasRef.current;
+      if (canvas) canvas.style.cursor = hit ? "pointer" : "grab";
     }
-  }, [worldPos]);
+  }, [worldPos, hitTest]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     if (dragging.current.nodeId) {
-      const wasDragging = dragging.current.nodeId;
-      const movedX = e.clientX - dragging.current.startX;
-      const movedY = e.clientY - dragging.current.startY;
-      dragging.current = { nodeId: null, mx: 0, my: 0, startX: 0, startY: 0 };
-      if (Math.sqrt(movedX * movedX + movedY * movedY) < 5) {
-        onNodeClick(wasDragging);
-      }
+      const node = dragging.current.nodeId;
+      const moved = Math.hypot(e.clientX - dragging.current.startX, e.clientY - dragging.current.startY) >= 5;
+      dragging.current = { nodeId: null, mx: 0, my: 0, startX: 0, startY: 0, moved: false };
+      if (!moved) onNodeClick(node);
     } else if (panning.current.active) {
-      const dx = e.clientX - panning.current.sx, dy = e.clientY - panning.current.sy;
-      if (Math.sqrt(dx * dx + dy * dy) < 5) {
+      const moved = Math.hypot(e.clientX - panning.current.sx, e.clientY - panning.current.sy) >= 5;
+      panning.current.active = false;
+      if (!moved) {
         const { x, y } = worldPos(e.clientX, e.clientY);
         const hit = hitTest(x, y);
         if (hit) onNodeClick(hit.id);
       }
-      panning.current.active = false;
     }
   }, [worldPos, hitTest, onNodeClick]);
 
+  const handleMouseLeave = useCallback(() => {
+    panning.current.active = false;
+    dragging.current.nodeId = null;
+    if (hoverRef.current) { hoverRef.current = null; dirtyRef.current = true; }
+  }, []);
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    scaleRef.current = Math.max(0.2, Math.min(5, scaleRef.current * delta));
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const wx = (mx - panRef.current.x) / scaleRef.current;
+    const wy = (my - panRef.current.y) / scaleRef.current;
+    const next = Math.max(0.15, Math.min(5, scaleRef.current * (e.deltaY > 0 ? 0.9 : 1.1)));
+    scaleRef.current = next;
+    panRef.current = { x: mx - wx * next, y: my - wy * next }; // zoom toward cursor
+    dirtyRef.current = true;
   }, []);
 
   return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: "100%", height: "100%", cursor: "grab", display: "block" }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onWheel={handleWheel}
-    />
+    <div ref={wrapRef} style={{ width: "100%", height: "100%", position: "relative", overflow: "hidden" }}>
+      <canvas
+        ref={canvasRef}
+        style={{ display: "block", cursor: "grab", touchAction: "none" }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+        onWheel={handleWheel}
+      />
+    </div>
   );
 }
 
@@ -338,7 +439,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 
   // Enhancements 11, 12 State
   const [showHistory, setShowHistory] = useState(false);
-  const [toc, setToc] = useState<{ id: string; text: string; level: number }[]>([]);
 
   // Graph state
   const [showGraph, setShowGraph] = useState(false);
@@ -435,25 +535,9 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
       setContentHtml("");
       setAiSummary(null);
       setIsEditing(false);
-      setToc([]);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
-
-  // Enhancement 12: Parse TOC
-  useEffect(() => {
-    if (!contentHtml) { setToc([]); return; }
-    const temp = document.createElement("div");
-    temp.innerHTML = contentHtml;
-    const headers = Array.from(temp.querySelectorAll("h1, h2, h3"));
-    const items = headers.map((h, i) => {
-      // Create a basic slug if ID doesn't exist
-      const text = h.textContent || "";
-      const slug = h.id || "h-" + text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '') || `h-${i}`;
-      return { id: slug, text, level: parseInt(h.tagName[1]) };
-    }).filter(i => i.text.trim().length > 0);
-    setToc(items);
-  }, [contentHtml]);
 
   // Keep contentHtmlRef in sync so isEditing effect can read latest value without stale closure
   useEffect(() => { contentHtmlRef.current = contentHtml; }, [contentHtml]);
@@ -1108,6 +1192,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
                   className="note-editor-body"
                   contentEditable={true}
                   suppressContentEditableWarning={true}
+                  data-placeholder="Start writing… press “/” for commands"
                   onInput={handleInput}
                   onKeyDown={handleKeyDown}
                   onKeyUp={handleKeyUp}
@@ -1123,7 +1208,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
                 style={{ padding: "20px 0", cursor: "pointer" }}
                 onDoubleClick={() => setIsEditing(true)}
                 onClick={handleDocClick}
-                dangerouslySetInnerHTML={{ __html: contentHtml || "<p className='muted'>Empty note. Double-click here to write.</p>" }}
+                dangerouslySetInnerHTML={{ __html: contentHtml || "<p class='note-empty-hint'>This note is empty. Double-click anywhere to start writing.</p>" }}
               />
             )}
 
@@ -1132,36 +1217,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
             <div className="row wrap gap8">{activeNoteLinks.map((it) => <EntityChip key={it.id} id={it.id} sub />)}</div>
           </div>
 
-          {/* Floating TOC */}
-          {toc.length > 0 && (
-            <div style={{ width: 220, flexShrink: 0, position: "sticky", top: 24, padding: "16px", background: "var(--surface)", borderLeft: "1px solid var(--border)", maxHeight: "calc(100vh - 100px)", overflowY: "auto" }}>
-              <div className="mono-sm ghost" style={{ marginBottom: 12 }}><I n="ph-list" /> TABLE OF CONTENTS</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {toc.map((t, i) => (
-                  <a 
-                    key={i} 
-                    href={`#${t.id}`} 
-                    onClick={(e) => {
-                      // Simple smooth scroll
-                      e.preventDefault();
-                      const el = document.getElementById(t.id);
-                      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }}
-                    style={{ 
-                      fontSize: "var(--fs-sm)", 
-                      color: "var(--text-dim)", 
-                      textDecoration: "none",
-                      paddingLeft: (t.level - 1) * 12,
-                      lineHeight: 1.3
-                    }}
-                    className="hover-text"
-                  >
-                    {t.text}
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
         </div>
         ) : (
@@ -1345,6 +1400,25 @@ function statusOptionsFor(type: string): { value: string; label: string }[] {
   ];
 }
 
+// A single cover candidate. If the remote image 404s or the network drops mid-load,
+// it degrades to a static placeholder tile rather than a browser broken-image glyph.
+function CoverOption({ c, onPick }: { c: { url: string; title: string }; onPick: () => void }) {
+  const [err, setErr] = useState(false);
+  if (err) {
+    return (
+      <div className="cover-option" style={{ display: "flex", alignItems: "center", justifyContent: "center", aspectRatio: "2/3", background: "var(--surface-2)", color: "var(--text-faint)", cursor: "default" }} title={`${c.title} (image unavailable)`}>
+        <I n="ph-image-broken" style={{ fontSize: 26 }} />
+      </div>
+    );
+  }
+  return (
+    <button className="cover-option" onClick={onPick} title={c.title}>
+      <img src={c.url} loading="lazy" alt={c.title} onError={() => setErr(true)} />
+      <span>{c.title}</span>
+    </button>
+  );
+}
+
 export function LibraryModule() {
   const { inspect, toast, dragTargetId, setDragTargetId } = useLoom();
   const modal = useModal();
@@ -1440,19 +1514,40 @@ export function LibraryModule() {
     const { title, type } = r1;
 
     const statusOptions = statusOptionsFor(type);
+    // Progress is configurable at creation for count-based media (pages/chapters/
+    // episodes); movies/TV-as-single use the Status field alone (Watched/Planned).
+    const counts = isCountProgress(type);
+    const [unitLabel] = UNIT_FOR[type] || ["Progress", ""];
+    const unit = unitLabel.toLowerCase();
     const r2 = await modal.form({
       title: "Add Media (Step 2 of 2)", icon: "ph-stack", accent: "var(--h-library)", submitLabel: "Next — Pick a Cover",
       fields: [
         { name: "status", label: "Status", type: "select", defaultValue: statusOptions[0].value, options: statusOptions },
+        ...(counts ? [
+          { name: "current", label: `Current ${unit}`, defaultValue: "0", type: "text" as const, placeholder: "0" },
+          { name: "total", label: `Total ${unit}s (0 if unknown)`, defaultValue: "0", type: "text" as const, placeholder: "0" },
+        ] : []),
         { name: "favorite", label: "Favorite", type: "select", defaultValue: "no", options: [{ value: "no", label: "No" }, { value: "yes", label: "⭐ Yes" }] }
       ]
     });
     if (!r2) return;
 
+    // Validate + normalise the progress numbers, then derive status/completion so the
+    // item is fully configured before it ever opens — no second trip through Update.
+    const total = counts ? Math.max(0, parseInt(r2.total, 10) || 0) : 1;
+    const currentRaw = counts ? Math.max(0, parseInt(r2.current, 10) || 0) : (r2.status === "Watched" || r2.status === "Completed" ? 1 : 0);
+    const current = total > 0 ? Math.min(currentRaw, total) : currentRaw;
+    let status = r2.status;
+    if (counts && total > 0 && current >= total) status = "Completed";
+    const completed = status === "Completed" || status === "Watched";
+    const now = new Date().toISOString();
+
     try {
       const ICON_FOR: Record<string, string> = { game: "ph-game-controller", anime: "ph-television", manga: "ph-book", book: "ph-book-open", manhwa: "ph-book", manhua: "ph-book", movie: "ph-film-strip", tv: "ph-television" };
       const createdItem = await create(title, {
-        mediaType: type, status: r2.status, favorite: r2.favorite === "yes", coverPath: "", notes: "", tags: [], progress: { current: 0, total: 0 }, tracking: {},
+        mediaType: type, status, favorite: r2.favorite === "yes", coverPath: "", notes: "", tags: [],
+        progress: { current, total },
+        tracking: completed ? { lastActivityAt: now, finishedAt: now } : (current > 0 ? { lastActivityAt: now } : {}),
         color: "var(--h-library)", icon: ICON_FOR[type] || "ph-book-open"
       });
       toast("Item created. Searching covers…", "ph-magnifying-glass");
@@ -1478,6 +1573,26 @@ export function LibraryModule() {
         toast("Failed to download cover.", "ph-warning");
     }
     setCoverPicker(null);
+  };
+
+  // Offline / fallback path: set the cover straight from a local image file. Works
+  // when the web providers are unreachable, so a card is never stuck cover-less.
+  const handleUploadCover = async () => {
+    if (!coverPicker) return;
+    const selected = await open({ multiple: false, filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"] }] });
+    if (!selected || typeof selected !== "string") return;
+    const item = items.find((it) => it.id === coverPicker.itemId);
+    if (!item) return;
+    try {
+      const imported = await importFile(selected, "copy");
+      const meta = getLibraryMeta(item);
+      await updateMeta(item.id, { ...meta, coverPath: imported.path });
+      toast(`Set cover for ${item.title}`, "ph-image");
+      setCoverPicker(null);
+    } catch (err) {
+      console.error("Cover upload failed:", err);
+      toast("Couldn't import that image.", "ph-warning");
+    }
   };
 
   // Re-open the cover search for an existing card (pencil-free cover swap).
@@ -1613,6 +1728,9 @@ export function LibraryModule() {
                 <div style={{ fontWeight: 600, fontSize: "var(--fs-base)" }}>Pick a cover for “{coverPicker.query}”</div>
                 <div className="ghost mono-sm" style={{ fontSize: "var(--fs-2xs)" }}>Set {coverPicker.page} · saved locally to your Covers folder</div>
               </div>
+              <button className="btn sm" onClick={handleUploadCover} title="Use an image from your computer">
+                <I n="ph-upload-simple" /> Upload
+              </button>
               <button className="btn sm" onClick={() => openCoverPicker(coverPicker.itemId, coverPicker.query, coverPicker.mediaType, coverPicker.page + 1)} disabled={coverPicker.loading} title="Fetch a different set of covers">
                 <I n="ph-arrows-clockwise" /> Refresh
               </button>
@@ -1622,10 +1740,7 @@ export function LibraryModule() {
               {coverPicker.loading
                 ? Array.from({ length: 10 }).map((_, i) => <div key={i} className="skeleton" style={{ aspectRatio: "2/3", borderRadius: "var(--r-md)" }} />)
                 : coverPicker.candidates.map((c, i) => (
-                  <button key={i} className="cover-option" onClick={() => handlePickCover(c.url)} title={c.title}>
-                    <img src={c.url} loading="lazy" alt={c.title} />
-                    <span>{c.title}</span>
-                  </button>
+                  <CoverOption key={i} c={c} onPick={() => handlePickCover(c.url)} />
                 ))}
               {!coverPicker.loading && coverPicker.candidates.length === 0 && (
                 <div className="muted" style={{ gridColumn: "1 / -1", textAlign: "center", padding: 30 }}>No covers found. Try Refresh or close to keep the default.</div>

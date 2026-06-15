@@ -18,6 +18,7 @@ import { fsReadNoteContent } from "../ipc/fs";
 import { encryptFile, decryptFile, indexTextFiles } from "../ipc/content";
 import { fsWriteAnyFile } from "../ipc/fs";
 import { save } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 // Local datetime formatted as the value an <input type="datetime-local"> expects.
 function toLocalInput(d: Date): string {
@@ -691,15 +692,17 @@ export function HabitsModule() {
                   <span className="chip" style={{ height: 22 }}><I n="ph-target" /> {meta.duration}-day</span>
                   {meta.paused && <span className="chip" style={{ "--mod": "var(--sys-warning)", height: 22 } as any}><I n="ph-pause" /> Paused</span>}
                 </div>
-                {/* Challenge heatmap — one cell per day of the selected duration. Only the
-                    current streak (the last N consecutive completed days) is shown as done;
-                    earlier days aren't individually recorded, so they stay neutral. No
-                    fabricated activity. */}
-                <div style={{ marginTop: 12, display: "grid", gridTemplateRows: "repeat(7, 11px)", gridAutoFlow: "column", gap: 4, overflowX: "auto", paddingBottom: 4 }}>
+                {/* Challenge progress — one cell per day of the selected duration, laid out
+                    on a grid whose columns flex to fill the card's full width. Short
+                    challenges (7/14-day) become a single row of wide segments; longer ones
+                    (30/66/90-day) wrap into evenly-sized rows. Capping at 15 columns keeps
+                    cells legible at any length. Only the current streak (the last N
+                    consecutive completed days) is shown as done — no fabricated activity. */}
+                <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: `repeat(${Math.min(meta.duration, 15)}, 1fr)`, gap: 4 }}>
                   {Array.from({ length: meta.duration }).map((_, i) => {
                     const isDone = i >= meta.duration - meta.streak;
                     return (
-                      <div key={i} style={{ width: 11, height: 11, borderRadius: "2px", background: isDone ? meta.color : "var(--surface-3)" }} title={isDone ? `Day ${i + 1} · completed` : `Day ${i + 1}`}></div>
+                      <div key={i} style={{ height: 14, borderRadius: 3, background: isDone ? meta.color : "var(--surface-3)" }} title={isDone ? `Day ${i + 1} · completed` : `Day ${i + 1}`}></div>
                     );
                   })}
                 </div>
@@ -1428,11 +1431,11 @@ export function FilesModule() {
 
   const [previewMedia, setPreviewMedia] = useState<{ path: string; ext: string } | null>(null);
 
-  const handleOpen = async (e: React.MouseEvent, path: string, ext: string) => {
-    e.stopPropagation();
+  const handleOpen = async (e: React.MouseEvent | null, path: string, ext: string) => {
+    e?.stopPropagation();
     const lowerExt = ext.toLowerCase();
-    // Enhancement 30: Native File Previews
-    if (['mp4', 'webm', 'ogg', 'mp3', 'wav', 'png', 'jpg', 'jpeg', 'md', 'txt'].includes(lowerExt)) {
+    // In-app preview for common media/text; everything else opens in the OS handler.
+    if (PREVIEWABLE_EXTS.includes(lowerExt)) {
       setPreviewMedia({ path, ext: lowerExt });
     } else {
       try { await openFile(path); }
@@ -1499,7 +1502,7 @@ export function FilesModule() {
     }
   };
 
-  const COLS = "1fr 90px 80px 110px 132px";
+  const COLS = "1fr 90px 80px 110px 184px";
   return (
     <div className="content-pad fade-in" style={{ "--mod": "var(--h-files)" } as any}>
       <PageHead mod="var(--h-files)" icon="ph-folder" kicker="Files" title="Everything you've attached"
@@ -1531,33 +1534,37 @@ export function FilesModule() {
           <span style={{ textAlign: "right" }}></span>
         </div>
         {list.map(({ item, meta }) => (
-          <div key={item.id} className="wrow" style={{ "--mod": meta.color, display: "grid", gridTemplateColumns: COLS, margin: 0, padding: "11px 16px", borderRadius: 0, borderTop: "1px solid var(--border-faint)" } as any} 
-               onClick={(e) => handleOpen(e, meta.path, meta.ext)} 
-               {...clickable(() => handleOpen({ stopPropagation: () => {} } as any, meta.path, meta.ext))}>
-            <div className="row gap12" style={{ minWidth: 0 }}>
+          <div key={item.id} className="wrow" style={{ "--mod": meta.color, display: "grid", gridTemplateColumns: COLS, margin: 0, padding: "11px 16px", borderRadius: 0, borderTop: "1px solid var(--border-faint)", alignItems: "center" } as any}>
+            {/* The open affordance is the name cell only — a discrete target so it can
+                never be hit by a near-miss on the action buttons (those live in their
+                own grid cell, a sibling, so their clicks never reach this handler). */}
+            <div className="row gap12" style={{ minWidth: 0, cursor: "pointer" }}
+                 title={`Open ${item.title}`}
+                 onClick={() => handleOpen(null, meta.path, meta.ext)}
+                 {...clickable(() => handleOpen(null, meta.path, meta.ext))}>
               <div className="wrow-ico" style={{ width: 28, height: 28, flex: "0 0 28px", fontSize: "var(--fs-base)" }}><I n={iconForExt(meta.ext)} /></div>
               <div style={{ minWidth: 0 }}>
                 <div className="wrow-t">{item.title}</div>
                 <div className="wrow-s" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{meta.path}</div>
               </div>
             </div>
-            <span className="mono-sm muted" style={{ alignSelf: "center" }}>{meta.ext}</span>
-            <span className="mono-sm muted" style={{ alignSelf: "center" }}>{meta.size}</span>
-            <span className="mono-sm ghost" style={{ alignSelf: "center" }}>{meta.updated}</span>
-            <div className="row gap6" style={{ alignSelf: "center", justifyContent: "flex-end" }}>
-              <button className="btn icon sm" style={{ padding: 4 }} onClick={(e) => handleEncrypt(e, item)} title={meta.path.toLowerCase().endsWith(".enc") ? "Decrypt" : "Encrypt"}>
+            <span className="mono-sm muted">{meta.ext}</span>
+            <span className="mono-sm muted">{meta.size}</span>
+            <span className="mono-sm ghost">{meta.updated}</span>
+            <div className="row gap8" style={{ justifyContent: "flex-end" }}>
+              <button type="button" className="btn icon sm" style={{ padding: 7 }} onClick={(e) => handleEncrypt(e, item)} title={meta.path.toLowerCase().endsWith(".enc") ? "Decrypt" : "Encrypt"}>
                 <I n={meta.path.toLowerCase().endsWith(".enc") ? "ph-lock-key" : "ph-lock"} style={{ color: meta.path.toLowerCase().endsWith(".enc") ? "var(--h-vault)" : "var(--text-faint)" }} />
               </button>
-              <button className="btn icon sm" style={{ padding: 4 }} onClick={(e) => { e.stopPropagation(); inspect(item.id); }} title="Details">
+              <button type="button" className="btn icon sm" style={{ padding: 7 }} onClick={(e) => { e.stopPropagation(); inspect(item.id); }} title="Details">
                 <I n="ph-magnifying-glass" style={{ color: "var(--text-faint)" }} />
               </button>
-              <button className="btn icon sm" style={{ padding: 4 }} onClick={(e) => handleReveal(e, meta.path)} title="Reveal in Explorer">
+              <button type="button" className="btn icon sm" style={{ padding: 7 }} onClick={(e) => handleReveal(e, meta.path)} title="Reveal in Explorer">
                 <I n="ph-folder-open" style={{ color: "var(--text-faint)" }} />
               </button>
-              <button className="btn icon sm" style={{ padding: 4 }} onClick={(e) => handleRename(e, item)} title="Rename">
+              <button type="button" className="btn icon sm" style={{ padding: 7 }} onClick={(e) => handleRename(e, item)} title="Rename">
                 <I n="ph-pencil" style={{ color: "var(--text-faint)" }} />
               </button>
-              <button className="btn icon sm" style={{ padding: 4 }} onClick={(e) => handleDelete(e, item.id, item.title)} title="Delete">
+              <button type="button" className="btn icon sm" style={{ padding: 7 }} onClick={(e) => handleDelete(e, item.id, item.title)} title="Delete">
                 <I n="ph-trash" style={{ color: "var(--text-faint)" }} />
               </button>
             </div>
@@ -1565,18 +1572,74 @@ export function FilesModule() {
         ))}
       </div>
       )}
-      {/* Preview Overlay */}
       {previewMedia && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 40 }} onClick={() => setPreviewMedia(null)}>
-          <button className="btn icon" style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.1)", color: "#fff" }} onClick={() => setPreviewMedia(null)}><I n="ph-x" /></button>
-          <div style={{ maxWidth: "100%", maxHeight: "100%", overflow: "auto", background: "var(--surface-1)", borderRadius: "var(--r-lg)", padding: 20, boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }} onClick={e => e.stopPropagation()}>
-             {['mp4', 'webm', 'ogg'].includes(previewMedia.ext) && <video src={`http://localhost:1420/fs/${encodeURIComponent(previewMedia.path)}`} controls autoPlay style={{ maxWidth: 800, maxHeight: 600 }} />}
-             {['mp3', 'wav'].includes(previewMedia.ext) && <audio src={`http://localhost:1420/fs/${encodeURIComponent(previewMedia.path)}`} controls autoPlay />}
-             {['png', 'jpg', 'jpeg'].includes(previewMedia.ext) && <img src={`http://localhost:1420/fs/${encodeURIComponent(previewMedia.path)}`} style={{ maxWidth: 800, maxHeight: 600, objectFit: "contain" }} alt="Preview" />}
-             {['md', 'txt'].includes(previewMedia.ext) && <div style={{ minWidth: 400, minHeight: 300, whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)" }}>Text preview loaded for {previewMedia.path}</div>}
-          </div>
-        </div>
+        <FilePreview
+          media={previewMedia}
+          onClose={() => setPreviewMedia(null)}
+          onOpenExternal={() => { const p = previewMedia.path; setPreviewMedia(null); openFile(p).catch(() => {}); }}
+        />
       )}
+    </div>
+  );
+}
+
+// Common previewable formats. Anything outside these opens in the OS handler instead.
+const PREVIEW_IMAGE = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
+const PREVIEW_VIDEO = ["mp4", "webm", "ogg", "mov", "mkv"];
+const PREVIEW_AUDIO = ["mp3", "wav", "flac", "m4a", "aac"];
+const PREVIEW_TEXT = ["md", "markdown", "txt", "csv", "log", "json", "xml", "yml", "yaml"];
+export const PREVIEWABLE_EXTS = [...PREVIEW_IMAGE, ...PREVIEW_VIDEO, ...PREVIEW_AUDIO, ...PREVIEW_TEXT];
+
+// In-app file preview. Media is served through Tauri's asset protocol via
+// convertFileSrc (the dev-server URL the old code used does not exist in a packaged
+// build). Text is read over IPC. Anything that fails to load degrades to a clear
+// fallback with an "open externally" escape hatch — never a broken-image glyph.
+function FilePreview({ media, onClose, onOpenExternal }: {
+  media: { path: string; ext: string };
+  onClose: () => void;
+  onOpenExternal: () => void;
+}) {
+  const { path, ext } = media;
+  const src = convertFileSrc(path);
+  const isImage = PREVIEW_IMAGE.includes(ext);
+  const isVideo = PREVIEW_VIDEO.includes(ext);
+  const isAudio = PREVIEW_AUDIO.includes(ext);
+  const isText = PREVIEW_TEXT.includes(ext);
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!isText) return;
+    let alive = true;
+    fsReadNoteContent(path).then((c) => alive && setText(c)).catch(() => alive && setFailed(true));
+    return () => { alive = false; };
+  }, [path, isText]);
+
+  const name = path.split(/[\/\\]/).pop() || path;
+  const Fallback = (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, padding: "50px 60px", textAlign: "center" }}>
+      <I n="ph-file-dashed" style={{ fontSize: 48, color: "var(--text-faint)" }} />
+      <div className="muted">No in-app preview for <strong>{name}</strong>.</div>
+      <button className="btn primary sm" onClick={onOpenExternal}><I n="ph-arrow-square-out" w="bold" /> Open externally</button>
+    </div>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }} onClick={onClose}>
+      <button className="btn icon" style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.1)", color: "#fff" }} onClick={onClose}><I n="ph-x" /></button>
+      <div style={{ maxWidth: "90vw", maxHeight: "90vh", overflow: "auto", background: "var(--surface-1)", borderRadius: "var(--r-lg)", padding: 20, boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
+        {isImage && (failed
+          ? Fallback
+          : <img src={src} onError={() => setFailed(true)} style={{ maxWidth: "82vw", maxHeight: "80vh", objectFit: "contain", display: "block" }} alt={name} />)}
+        {isVideo && <video src={src} controls autoPlay onError={() => setFailed(true)} style={{ maxWidth: "82vw", maxHeight: "80vh", display: "block" }} />}
+        {isAudio && <audio src={src} controls autoPlay onError={() => setFailed(true)} />}
+        {isText && (failed
+          ? Fallback
+          : text === null
+            ? <div className="muted" style={{ padding: 40 }}>Loading preview…</div>
+            : <pre style={{ maxWidth: "82vw", maxHeight: "80vh", overflow: "auto", margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", fontSize: "var(--fs-sm)", lineHeight: 1.6 }}>{text}</pre>)}
+        {!isImage && !isVideo && !isAudio && !isText && Fallback}
+      </div>
     </div>
   );
 }

@@ -78,7 +78,7 @@ export function InlineLink({ id }: InlineLinkProps) {
 interface ConnectionsPanelProps { id: string; onClose: () => void; }
 export function ConnectionsPanel({ id, onClose }: ConnectionsPanelProps) {
   const { inspect, navigate, toast } = useLoom();
-  const { resolve, items, links: allLinks, link, unlink, create } = useItemStore();
+  const { resolve, items, links: allLinks, link, unlink, create, remove } = useItemStore();
   const commands = useCommands();
   const [picking, setPicking] = useState(false);
   const e = resolve(id);
@@ -98,6 +98,15 @@ export function ConnectionsPanel({ id, onClose }: ConnectionsPanelProps) {
       });
       toast("Bookmarked — find it in Bookmarks", "ph-bookmark-simple");
     } catch (err) { console.error("Failed to bookmark item:", err); }
+  };
+
+  // Toggle off — removes the in-app bookmark from the same place it was created.
+  const removeBookmark = async () => {
+    if (!existingBookmark) return;
+    try {
+      await remove(existingBookmark.id);
+      toast("Bookmark removed", "ph-bookmark-simple");
+    } catch (err) { console.error("Failed to remove bookmark:", err); }
   };
 
   // Relationships are DERIVED from the SQLite links table held in the store — reactive
@@ -188,9 +197,14 @@ export function ConnectionsPanel({ id, onClose }: ConnectionsPanelProps) {
           </button>
           {e.type !== "bookmark" && (
             existingBookmark ? (
-              <button className="btn sm active" style={{ width: "100%", justifyContent: "center" }} onClick={() => { navigate("bookmarks"); }}>
-                <I n="ph-bookmark-simple" w="fill" /> Bookmarked — view in Bookmarks
-              </button>
+              <div className="row gap6">
+                <button className="btn sm active" style={{ flex: 1, justifyContent: "center" }} onClick={() => navigate("bookmarks")} title="View in Bookmarks">
+                  <I n="ph-bookmark-simple" w="fill" /> Bookmarked
+                </button>
+                <button className="btn icon sm" onClick={removeBookmark} title="Remove bookmark" aria-label="Remove bookmark">
+                  <I n="ph-x" />
+                </button>
+              </div>
             ) : (
               <button className="btn sm" style={{ width: "100%", justifyContent: "center" }} onClick={bookmarkThis}>
                 <I n="ph-bookmark-simple" /> Bookmark this {tlabel(e.type)}

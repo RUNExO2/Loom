@@ -14,6 +14,7 @@ import {
   getStartupView, SHORTCUTS, ThemePref, Resolved,
   getFontPref, applyFont, getDensityPref, applyDensity, getAmbientPref, applyAmbient,
 } from "./lib/settings";
+import { getCustomThemeState, applyCustomTheme, activeTheme } from "./lib/theme";
 import { ConnectionsPanel, Toasts, ShortcutsOverlay } from "./components/shared";
 import { fsImportNoteFile, fsImportFile } from "./ipc/fs";
 import { getCustomCss } from "./ipc/content";
@@ -136,6 +137,8 @@ export function App() {
       applyAmbient(ambient as boolean);
       setReady(true);
     });
+    // Apply the saved custom theme (design-token overrides) on launch, if enabled.
+    getCustomThemeState().then((st) => applyCustomTheme(activeTheme(st), st.enabled));
     // Inject any user CSS from the Custom CSS folder.
     getCustomCss().then((css) => {
       if (!css) return;

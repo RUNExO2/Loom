@@ -8,11 +8,13 @@ import {
 } from "../lib/settings";
 import { useItemStore } from "../lib/itemStore";
 import { defaultDashboardLayout } from "./Dashboard";
-import { revealCustomCssFolder, optimizeDatabase, importNotesFromFolder } from "../ipc/content";
+import { optimizeDatabase, importNotesFromFolder } from "../ipc/content";
 import { open } from "@tauri-apps/plugin-dialog";
 import { exportData, backupDatabase, importData } from "../ipc/settings";
 import { useModal } from "./Modal";
 import { Button } from "./ui/Button";
+import { ThemeStudio } from "./ThemeStudio";
+import { AnimatePresence } from "framer-motion";
 import * as Switch from "@radix-ui/react-switch";
 
 function Section({ icon, title, sub, danger, children }: { icon: string; title: string; sub: string; danger?: boolean; children: React.ReactNode }) {
@@ -41,6 +43,7 @@ export function SettingsModule() {
   const [font, setFont] = useState<string>("inter");
   const [condensed, setCondensed] = useState<boolean>(false);
   const [ambient, setAmbient] = useState<boolean>(false);
+  const [themeStudio, setThemeStudio] = useState(false);
 
   useEffect(() => {
     getStartupView().then(setStartup);
@@ -58,16 +61,6 @@ export function SettingsModule() {
   };
   const toggleAmbient = (on: boolean) => {
     setAmbient(on); applyAmbient(on); setAmbientPref(on);
-  };
-
-  const onOpenCssFolder = async () => {
-    try {
-      await revealCustomCssFolder();
-      toast("Custom CSS folder opened — drop .css files there and restart", "ph-folder-open");
-    } catch (e) {
-      console.error("Open CSS folder failed:", e);
-      toast("Could not open the Custom CSS folder", "ph-warning");
-    }
   };
 
   const onOptimizeDb = async () => {
@@ -271,10 +264,10 @@ export function SettingsModule() {
           </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
-              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Custom CSS Snippets</div>
-              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Drop .css files in this folder; they load on next launch.</div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Custom Theme</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Design tokens for color, typography, shape, and effects — live preview, no restart. Save, export, and import multiple themes.</div>
             </div>
-            <Button iconLeft="ph-folder-open" onClick={onOpenCssFolder}>Open Folder</Button>
+            <Button iconLeft="ph-paint-brush-broad" onClick={() => setThemeStudio(true)}>Open Theme Studio</Button>
           </div>
         </div>
       </Section>
@@ -402,6 +395,10 @@ export function SettingsModule() {
           </Button>
         </div>
       </Section>
+
+      <AnimatePresence>
+        {themeStudio && <ThemeStudio onClose={() => setThemeStudio(false)} />}
+      </AnimatePresence>
     </div>
   );
 }

@@ -54,6 +54,12 @@ struct ItunesResult {
     artwork: Option<String>,
 }
 
+#[derive(Deserialize, Debug)]
+struct SteamApp {
+    appid: u64,
+    name: String,
+}
+
 fn get_covers_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let covers_dir = app_data_dir.join("Covers");
@@ -123,18 +129,43 @@ pub async fn fetch_cover_candidates(query: String, media_type: String, page: Opt
                 }
             }
         }
-        "movie" | "tv" | "game" => {
-            let entity = if media_type == "game" { "software,macSoftware" } else { "movie,tvSeason" };
+        "movie" => {
             let offset = (page - 1) * 10;
-            let url = format!("https://itunes.apple.com/search?term={}&entity={}&limit=10&offset={}", urlencoding::encode(&query), entity, offset);
+            let url = format!("https://itunes.apple.com/search?term={}&entity=movie&limit=10&offset={}", urlencoding::encode(&query), offset);
             let body = get_text(&client, &url).await?;
             let json: ItunesResponse = serde_json::from_str(&body)
                 .map_err(|e| format!("iTunes response could not be parsed: {e}"))?;
             for result in json.results {
                 if let (Some(name), Some(artwork)) = (result.name, result.artwork) {
-                    let high_res_artwork = artwork.replace("100x100bb", "600x600bb").replace("512x512bb", "600x600bb");
-                    candidates.push(CoverCandidate { url: high_res_artwork, title: name });
+                    candidates.push(CoverCandidate { url: artwork.replace("100x100bb", "600x600bb"), title: name });
                 }
+            }
+        }
+        "tv" => {
+            let offset = (page - 1) * 10;
+            let url = format!("https://itunes.apple.com/search?term={}&entity=tvSeason&limit=10&offset={}", urlencoding::encode(&query), offset);
+            let body = get_text(&client, &url).await?;
+            let json: ItunesResponse = serde_json::from_str(&body)
+                .map_err(|e| format!("iTunes response could not be parsed: {e}"))?;
+            for result in json.results {
+                if let (Some(name), Some(artwork)) = (result.name, result.artwork) {
+                    candidates.push(CoverCandidate { url: artwork.replace("100x100bb", "600x600bb"), title: name });
+                }
+            }
+        }
+        "game" => {
+            // Steam Community search - free, no key, returns appid + name.
+            // library_600x900.jpg is the 2:3 portrait capsule, ideal for card UI.
+            let url = format!("https://steamcommunity.com/actions/SearchApps/{}", urlencoding::encode(&query));
+            let body = get_text(&client, &url).await?;
+            let all: Vec<SteamApp> = serde_json::from_str(&body)
+                .map_err(|e| format!("Steam response could not be parsed: {e}"))?;
+            let start = ((page - 1) * 10) as usize;
+            for app in all.iter().skip(start).take(10) {
+                candidates.push(CoverCandidate {
+                    url: format!("https://cdn.akamai.steamstatic.com/steam/apps/{}/library_600x900.jpg", app.appid),
+                    title: app.name.clone(),
+                });
             }
         }
         other => {
@@ -142,7 +173,7 @@ pub async fn fetch_cover_candidates(query: String, media_type: String, page: Opt
         }
     }
 
-    // Empty is a valid, real result (no matches) — not an error. The frontend handles
+    // Empty is a valid, real result (no matches) - not an error. The frontend handles
     // the empty case distinctly from a thrown error.
     Ok(candidates)
 }

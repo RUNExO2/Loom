@@ -142,33 +142,79 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
         "#
     )?;
 
-    // ── Phase 7: full-text search index (FTS5) ────────────────────────────────────
-    // Standalone FTS5 table over item title + type (metadata is intentionally NOT
-    // indexed — it is large JSON and was the worst offender in the old triple-LIKE
-    // scan). Triggers keep it in lockstep with `items` regardless of which Rust path
-    // writes the row, so search never falls back to a full-table scan. Soft-deletes
-    // stay in the index and are filtered at query time via a join on items.deleted.
-    // rusqlite's `bundled` SQLite ships with SQLITE_ENABLE_FTS5, so no extra feature
-    // flag is needed.
-    conn.execute_batch(
+    // ── Phase 9: application-wide full-text search index (FTS5) ───────────────────
+    // FTS5 over title, item_type, and a derived `content` column that folds in the
+    // searchable text every item keeps inside its metadata JSON: note bodies, file
+    // text indexed by `index_text_files`, tags, authors, folders, URLs, descriptions.
+    //
+    // The previous index covered only title + item_type, which silently dropped all
+    // content/tag/metadata matching — "search everything" had degraded into a title
+    // prefix matcher. We index a curated set of text-bearing keys (never the raw JSON
+    // blob, which would pollute the index with structural keys like "color"/"icon").
+    // Triggers recompute `content` on every write, guarded by json_valid() so a
+    // malformed metadata blob can never abort an item insert/update.
+    //
+    // rusqlite's `bundled` SQLite ships with SQLITE_ENABLE_FTS5 + JSON1, so no extra
+    // feature flag is needed.
+    const FTS_KEYS: &[&str] = &[
+        "full_text", "content", "body", "text", "description", "desc", "note",
+        "summary", "excerpt", "url", "author", "creator", "artist", "studio",
+        "folder", "kind", "project", "sub", "byline", "site_name", "status",
+        "tags", "tag",
+    ];
+    // Build the `content` SQL expression for a given metadata source ("new" inside a
+    // trigger, "items" inside the backfill SELECT).
+    let fts_content = |src: &str| -> String {
+        let inner = FTS_KEYS
+            .iter()
+            .map(|k| format!("coalesce(json_extract({src}.metadata,'$.{k}'),'')"))
+            .collect::<Vec<_>>()
+            .join(" || ' ' || ");
+        format!("CASE WHEN json_valid({src}.metadata) THEN ({inner}) ELSE '' END")
+    };
+
+    // Migrate pre-Phase-9 indexes (no `content` column): drop + rebuild from scratch.
+    // The FTS table is a pure derived index, so rebuilding it is always safe.
+    let needs_rebuild: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type='table' AND name='items_fts' AND sql NOT LIKE '%content%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if needs_rebuild > 0 {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS items_fts_ai; \
+             DROP TRIGGER IF EXISTS items_fts_ad; \
+             DROP TRIGGER IF EXISTS items_fts_au; \
+             DROP TABLE IF EXISTS items_fts;",
+        )?;
+    }
+
+    conn.execute_batch(&format!(
         r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-            item_id UNINDEXED, title, item_type, tokenize = 'unicode61'
+            item_id UNINDEXED, title, item_type, content, tokenize = 'unicode61'
         );
         CREATE TRIGGER IF NOT EXISTS items_fts_ai AFTER INSERT ON items BEGIN
-            INSERT INTO items_fts(item_id, title, item_type) VALUES (new.id, new.title, new.item_type);
+            INSERT INTO items_fts(item_id, title, item_type, content)
+            VALUES (new.id, new.title, new.item_type, {content});
         END;
         CREATE TRIGGER IF NOT EXISTS items_fts_ad AFTER DELETE ON items BEGIN
             DELETE FROM items_fts WHERE item_id = old.id;
         END;
         CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE ON items BEGIN
             DELETE FROM items_fts WHERE item_id = old.id;
-            INSERT INTO items_fts(item_id, title, item_type) VALUES (new.id, new.title, new.item_type);
+            INSERT INTO items_fts(item_id, title, item_type, content)
+            VALUES (new.id, new.title, new.item_type, {content});
         END;
         "#,
-    )?;
-    // One-time backfill for DBs that pre-date the FTS index. Idempotent: only runs
-    // when the index is empty but items exist; the triggers maintain it thereafter.
+        content = fts_content("new"),
+    ))?;
+
+    // Backfill fresh or just-rebuilt indexes. Idempotent: only runs when the index is
+    // empty but items exist; the triggers maintain it thereafter.
     let fts_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM items_fts", [], |r| r.get(0))
         .unwrap_or(0);
@@ -176,10 +222,11 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
         .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
         .unwrap_or(0);
     if fts_count == 0 && items_count > 0 {
-        conn.execute(
-            "INSERT INTO items_fts(item_id, title, item_type) SELECT id, title, item_type FROM items",
-            [],
-        )?;
+        conn.execute_batch(&format!(
+            "INSERT INTO items_fts(item_id, title, item_type, content) \
+             SELECT id, title, item_type, {content} FROM items;",
+            content = fts_content("items"),
+        ))?;
     }
 
     // Soft-migration: per-widget config payload (e.g. Custom Widget HTML).
@@ -256,4 +303,74 @@ pub fn init_db(path: &str) -> Result<Connection> {
     tx.commit()?;
 
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_schema(&conn).unwrap();
+        conn.execute("INSERT INTO workspaces (id, name) VALUES ('ws','W')", [])
+            .unwrap();
+        conn
+    }
+
+    fn insert_item(conn: &Connection, id: &str, ty: &str, title: &str, metadata: &str) {
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, title, metadata) \
+             VALUES (?1, 'ws', ?2, ?3, ?4)",
+            rusqlite::params![id, ty, title, metadata],
+        )
+        .unwrap();
+    }
+
+    // Mirrors build_fts_match: a single quoted prefix term.
+    fn search(conn: &Connection, term: &str) -> Vec<String> {
+        let m = format!("\"{}\"*", term);
+        let mut stmt = conn
+            .prepare(
+                "SELECT i.id FROM items_fts JOIN items i ON i.id = items_fts.item_id \
+                 WHERE items_fts MATCH ?1 AND i.deleted = 0 ORDER BY rank",
+            )
+            .unwrap();
+        let rows = stmt.query_map([m], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn fts_indexes_title_content_tags_and_metadata() {
+        let conn = mem();
+        insert_item(&conn, "n1", "note", "Berserk thoughts", r#"{"folder":"Manga"}"#);
+        // File body lives only in metadata.full_text (written by index_text_files).
+        insert_item(&conn, "f1", "file", "readme.md", r#"{"full_text":"the quick brown fox"}"#);
+        // Tag + author live in metadata.
+        insert_item(&conn, "l1", "library", "Designing Data-Intensive Applications",
+            r#"{"tags":"THESIS","author":"Kleppmann"}"#);
+
+        assert_eq!(search(&conn, "berserk"), vec!["n1"]);   // title
+        assert_eq!(search(&conn, "brown"), vec!["f1"]);     // metadata.full_text content
+        assert_eq!(search(&conn, "thesis"), vec!["l1"]);    // tag
+        assert_eq!(search(&conn, "kleppmann"), vec!["l1"]); // author metadata
+    }
+
+    #[test]
+    fn fts_content_reindexes_on_metadata_update() {
+        let conn = mem();
+        insert_item(&conn, "f1", "file", "doc.txt", "{}");
+        assert!(search(&conn, "photosynthesis").is_empty());
+        // Index Text folds file body into metadata.full_text → AFTER UPDATE trigger.
+        conn.execute("UPDATE items SET metadata = ?1 WHERE id = 'f1'",
+            [r#"{"full_text":"notes about photosynthesis"}"#]).unwrap();
+        assert_eq!(search(&conn, "photosynthesis"), vec!["f1"]);
+    }
+
+    #[test]
+    fn fts_tolerates_malformed_metadata() {
+        let conn = mem();
+        // Invalid JSON must not abort the insert (json_valid guard) and title still indexes.
+        insert_item(&conn, "x1", "note", "Valid Title", "{not json");
+        assert_eq!(search(&conn, "valid"), vec!["x1"]);
+    }
 }
