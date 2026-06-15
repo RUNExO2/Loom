@@ -1,0 +1,22 @@
+{
+  "loomTheme": 1,
+  "name": "Void Purple",
+  "tokens": {
+    "--bg": "#0a0a0f",
+    "--surface-1": "#111118",
+    "--surface-2": "#18181f",
+    "--glass": "#0d0d14",
+    "--border": "#2a2a38",
+    "--surface-hover": "#20202c",
+    "--accent": "#7c6eff",
+    "--selection-bg": "#7c6eff",
+    "--text": "#e8e6f0",
+    "--text-dim": "#8a87a0",
+    "--reader-bg": "#111118",
+    "--reader-text": "#cac7de",
+    "--graph-edge": "#2e2a45",
+    "--graph-label": "#e8e6f0",
+    "--font-ui": "\"Inter\", system-ui, sans-serif",
+    "--radius-scale": "1"
+  }
+}

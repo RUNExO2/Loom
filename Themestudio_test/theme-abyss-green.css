@@ -1,0 +1,21 @@
+/* ============================================
+   Abyss Green — Terminal depths dark theme
+   Charcoal base · Emerald accent
+   ============================================ */
+
+:root {
+  --bg: #080e0a;
+  --accent: #2eff8a;
+  --surface-1: #0f1a10;
+  --surface-2: #141d14;
+  --glass: rgba(46, 255, 138, 0.05);
+  --border: #1e3020;
+  --text: #d6f0e0;
+  --text-dim: #6b9b78;
+  --surface-hover: #192418;
+  --selection-bg: #2eff8a;
+  --graph-edge: #1e3020;
+  --graph-label: #d6f0e0;
+  --reader-bg: #0f1a10;
+  --reader-text: #a8d8b8;
+}
