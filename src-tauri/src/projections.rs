@@ -139,6 +139,127 @@ pub async fn get_timeline(state: State<'_, AppState>, workspace_id: String) -> R
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
+// ---- Activity feed (unified change timeline) ----
+// A workspace-wide stream of what changed and when, across every item type. Sourced
+// honestly from SQLite: creations come from items.created_at; deletions come from the
+// mutation_ledger (the only place a delete is timestamped). Updates are intentionally
+// excluded — the schema doesn't timestamp them, and a faked time would be a lie.
+#[derive(Serialize)]
+pub struct ActivityEntry {
+    pub id: String,
+    pub action: String, // "created" | "deleted"
+    pub item_id: String,
+    pub kind: String,   // item_type
+    pub title: String,
+    pub icon: String,
+    pub color: String,
+    pub ts: i64,
+    pub when: String,
+}
+
+fn type_visual(item_type: &str) -> (&'static str, &'static str) {
+    match item_type {
+        "task" => ("ph-check-square", "var(--h-tasks)"),
+        "note" => ("ph-note", "var(--h-notes)"),
+        "project" => ("ph-kanban", "var(--h-projects)"),
+        "habit" => ("ph-pulse", "var(--h-habits)"),
+        "library" => ("ph-stack", "var(--h-library)"),
+        "file" => ("ph-file", "var(--h-files)"),
+        "bookmark" => ("ph-bookmark-simple", "var(--h-bookmarks)"),
+        "calendar" => ("ph-calendar-dots", "var(--h-calendar)"),
+        "automation" => ("ph-lightning", "var(--h-automation)"),
+        _ => ("ph-circle", "var(--text-faint)"),
+    }
+}
+
+fn when_label(dt: DateTime<Local>, now: DateTime<Local>) -> String {
+    let same_day = dt.year() == now.year() && dt.month() == now.month() && dt.day() == now.day();
+    let short = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    if same_day {
+        format!("Today · {:02}:{:02}", dt.hour(), dt.minute())
+    } else {
+        format!("{} {}", short[dt.month0() as usize], dt.day())
+    }
+}
+
+#[tauri::command]
+pub async fn get_activity_feed(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<ActivityEntry>, String> {
+    let cap = limit.unwrap_or(100) as usize;
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            let now = Local::now();
+            let mut entries: Vec<ActivityEntry> = Vec::new();
+
+            // Creations — every item in the workspace, deleted or not.
+            let mut stmt = conn.prepare(
+                "SELECT id, item_type, title, created_at FROM items WHERE workspace_id = ?1",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&workspace_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            }).map_err(|e| e.to_string())?;
+            for row in rows {
+                let (id, kind, title, created) = row.map_err(|e| e.to_string())?;
+                let dt = parse_created_at(&created).unwrap_or(now);
+                let (icon, color) = type_visual(&kind);
+                entries.push(ActivityEntry {
+                    id: format!("c:{}", id),
+                    action: "created".into(),
+                    item_id: id, kind, title,
+                    icon: icon.into(), color: color.into(),
+                    ts: dt.timestamp_millis(),
+                    when: when_label(dt, now),
+                });
+            }
+
+            // Deletions — recovered from the mutation ledger, joined back to the item
+            // (still present as a soft-deleted row) for its type/title, scoped to ws.
+            let mut dstmt = conn.prepare(
+                "SELECT ml.payload, ml.created_at FROM mutation_ledger ml \
+                 WHERE ml.status = 'COMMITTED' \
+                   AND ml.command_type IN ('delete_item','automation_delete') \
+                 ORDER BY ml.created_at DESC LIMIT 500",
+            ).map_err(|e| e.to_string())?;
+            let drows = dstmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }).map_err(|e| e.to_string())?;
+            for row in drows {
+                let (payload, created) = row.map_err(|e| e.to_string())?;
+                let pid = serde_json::from_str::<Value>(&payload)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(String::from));
+                let pid = match pid { Some(p) => p, None => continue };
+                let found: Option<(String, String, String)> = conn.query_row(
+                    "SELECT item_type, title, workspace_id FROM items WHERE id = ?1",
+                    [&pid],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).ok();
+                if let Some((kind, title, ws)) = found {
+                    if ws != workspace_id { continue; }
+                    let dt = parse_created_at(&created).unwrap_or(now);
+                    let (icon, color) = type_visual(&kind);
+                    entries.push(ActivityEntry {
+                        id: format!("d:{}:{}", pid, created),
+                        action: "deleted".into(),
+                        item_id: pid, kind, title,
+                        icon: icon.into(), color: color.into(),
+                        ts: dt.timestamp_millis(),
+                        when: when_label(dt, now),
+                    });
+                }
+            }
+
+            entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+            entries.truncate(cap);
+            Ok(entries)
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
 // ---- Stats ----
 #[derive(Serialize)]
 pub struct StatCard {

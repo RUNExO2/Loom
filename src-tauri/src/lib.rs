@@ -4,6 +4,7 @@ mod automation;
 mod export;
 mod projections;
 mod fs_commands;
+mod recovery;
 mod dashboard_commands;
 mod library_commands;
 mod content_commands;
@@ -141,6 +142,12 @@ pub fn run() {
             commands::create_saved_search,
             commands::get_saved_searches,
             commands::delete_saved_search,
+            recovery::get_deletion_history,
+            recovery::restore_deleted_item,
+            recovery::create_workspace_snapshot,
+            recovery::get_workspace_snapshots,
+            recovery::delete_workspace_snapshot,
+            recovery::restore_workspace_snapshot,
             commands::verify_integrity,
             commands::get_system_state,
             commands::get_setting,
@@ -150,6 +157,7 @@ pub fn run() {
             commands::repair_integrity,
             projections::get_timeline,
             projections::get_stats,
+            projections::get_activity_feed,
             fs_commands::fs_create_file,
             fs_commands::fs_import_file,
             fs_commands::fs_open_file,

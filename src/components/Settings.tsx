@@ -17,6 +17,7 @@ import { useModal } from "./Modal";
 import { mutationEngine } from "../lib/mutationEngine";
 import { Button } from "./ui/Button";
 import { ThemeStudio } from "./ThemeStudio";
+import { RecoveryPanel } from "./RecoveryPanel";
 import { AnimatePresence } from "framer-motion";
 import * as Switch from "@radix-ui/react-switch";
 
@@ -361,6 +362,11 @@ export function SettingsModule() {
             </button>
           ))}
         </div>
+      </Section>
+
+      {/* Recovery */}
+      <Section icon="ph-clock-counter-clockwise" title="Recovery" sub="Undo at workspace scale — restore deleted items or roll the whole workspace back to a snapshot.">
+        <RecoveryPanel />
       </Section>
 
       {/* Data */}

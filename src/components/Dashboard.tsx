@@ -9,6 +9,7 @@ import { useItemStore } from "../lib/itemStore";
 import { getTaskMeta } from "../lib/meta";
 import { createDashboardViewModel, DashboardVMCtx, useDashboardVM, greetingFor } from "../lib/viewmodels";
 import { Item, DashboardWidget } from "../ipc/items";
+import { getActivityFeed, ActivityEntry } from "../ipc/recovery";
 import { moveElement, resizeElement, compact } from "../lib/layoutEngine";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -427,6 +428,37 @@ function WTimeline() {
   );
 }
 
+// Unified activity feed — creations + deletions across every item type, sourced from
+// the backend's get_activity_feed (items.created_at + the mutation ledger). Refreshes
+// when the item store changes so a new/deleted item shows up immediately.
+function WActivity() {
+  const { inspect } = useLoom();
+  const { workspaceId, items } = useItemStore();
+  const [feed, setFeed] = useState<ActivityEntry[]>([]);
+  useEffect(() => {
+    if (!workspaceId) return;
+    let alive = true;
+    getActivityFeed(workspaceId, 40).then((f) => { if (alive) setFeed(f); }).catch(() => {});
+    return () => { alive = false; };
+  }, [workspaceId, items.length]);
+  return (
+    <div>
+      {feed.length === 0
+        ? <EmptyState compact icon="ph-pulse" title="No activity yet" />
+        : feed.map((e) => {
+          const open = () => { if (e.action === "created") inspect(e.item_id); };
+          return (
+            <div key={e.id} className="wrow" style={{ "--mod": e.color, opacity: e.action === "deleted" ? 0.7 : 1 } as any} onClick={open} {...clickable(open)}>
+              <div className="wrow-ico"><I n={e.action === "deleted" ? "ph-trash" : e.icon} w="fill" /></div>
+              <div className="wrow-main"><div className="wrow-t">{e.title}</div><div className="wrow-s">{e.action === "deleted" ? "Deleted" : "Created"} · {e.kind}</div></div>
+              <span className="wrow-meta">{e.when.replace("Today · ", "")}</span>
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
 function WWeather() {
   const [weather, setWeather] = useState<{ temp: number; label: string; icon: string; place: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -559,6 +591,7 @@ const WIDGETS: Record<string, any> = {
   watching: { title: "Current Watching", icon: "ph-television", color: "var(--h-library)", cols: [4, 6, 8], def: 8, body: WWatching, desc: "Anime, shows, and games in flight.", to: "library" },
   files:    { title: "Recently Opened", icon: "ph-folder-open", color: "var(--h-files)", cols: [4, 6], def: 4, body: WFiles, desc: "Files you touched recently.", to: "files" },
   timeline: { title: "Recent Activity", icon: "ph-clock-counter-clockwise", color: "var(--h-timeline)", cols: [4, 6], def: 4, body: WTimeline, desc: "The latest entries in your life-stream.", to: "timeline" },
+  activity: { title: "Activity Feed", icon: "ph-pulse", color: "var(--h-timeline)", cols: [4, 6], def: 4, body: WActivity, desc: "Everything created and deleted across the workspace." },
   weather:  { title: "Local Weather", icon: "ph-cloud-sun", color: "var(--accent)", cols: [4], def: 4, body: WWeather, desc: "Current conditions at your location." },
   inbox:    { title: "Global Inbox", icon: "ph-tray", color: "var(--h-notes)", cols: [4, 6], def: 4, body: WInbox, desc: "Unprocessed items across the system." },
   custom:   { title: "Custom Widget", icon: "ph-code", color: "var(--h-timeline)", cols: [4, 6, 8, 12], def: 4, body: WCustom, desc: "Embed custom HTML/CSS snippets." },

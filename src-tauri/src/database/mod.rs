@@ -144,6 +144,21 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
             workspace_id TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        -- Whole-workspace snapshots for rollback. `payload` is a JSON capture of every
+        -- item (id, type, title, metadata, flags, deleted) and link in the workspace at
+        -- snapshot time. Restore re-applies that state (toggling the soft-delete flag,
+        -- never hard-deleting) so file rows and on-disk blobs survive a rollback.
+        CREATE TABLE IF NOT EXISTS workspace_snapshots (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            item_count INTEGER NOT NULL DEFAULT 0,
+            link_count INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshots_ws ON workspace_snapshots(workspace_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_exec_automation ON automation_executions(automation_id);
         CREATE INDEX IF NOT EXISTS idx_exec_started ON automation_executions(started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_exec_status ON automation_executions(status);
@@ -155,10 +170,6 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
         -- Phase 7: scheduler last_attempt + prune both filter by automation_id and sort
         -- by started_at DESC. A composite serves both without a separate sort step.
         CREATE INDEX IF NOT EXISTS idx_exec_auto_started ON automation_executions(automation_id, started_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
-        CREATE INDEX IF NOT EXISTS idx_items_priority ON items(priority);
-        CREATE INDEX IF NOT EXISTS idx_items_due ON items(due);
-        CREATE INDEX IF NOT EXISTS idx_items_tag ON items(tag);
         "#
     )?;
 
@@ -270,7 +281,15 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE items ADD COLUMN due TEXT", []);
     let _ = conn.execute("ALTER TABLE items ADD COLUMN progress INTEGER", []);
     let _ = conn.execute("ALTER TABLE items ADD COLUMN tag TEXT", []);
-    
+
+    // Promoted-column indexes. MUST run AFTER the ADD COLUMN soft-migrations above:
+    // on a pre-existing DB the columns don't exist until the ALTERs land, so creating
+    // these in the first batch would fail the whole batch and abort setup_schema.
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_priority ON items(priority)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due ON items(due)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_tag ON items(tag)", []);
+
     // Soft-migration: Create the dashboard_widgets table in existing DBs
     let _ = conn.execute(
         r#"CREATE TABLE IF NOT EXISTS dashboard_widgets (

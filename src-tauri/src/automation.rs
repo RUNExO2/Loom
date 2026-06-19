@@ -893,7 +893,150 @@ pub fn scheduler_tick(conn: &mut Connection) -> bool {
             }
         }
     }
+    // Recurring tasks ride the same tick: a completed recurring task spawns its next
+    // instance. Folded into the scheduler's mutated flag so the frontend reconciles.
+    mutated |= recurring_tick(conn);
     mutated
+}
+
+// ── Recurring tasks ───────────────────────────────────────────────────────────
+// A task carries a recurrence rule in its metadata:
+//   metadata.recurrence = { "unit": "day"|"week"|"month"|"year", "every": <int ≥1> }
+// When the user marks such a task done, the next scheduler tick spawns the next
+// instance (done=false, dueDate advanced by the rule, recurrence carried forward)
+// and stamps the completed one with recurrenceSpawned=true so it never double-spawns.
+// State lives entirely in SQLite — the flag makes the spawn idempotent across
+// restarts, exactly like the automation scheduler derives "due" from persisted rows.
+
+const MONTHS_ABBR: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+// Advance a date by `every` units. month/year clamp to the last valid day
+// (Jan 31 + 1 month → Feb 28/29) via chrono's checked_add_months.
+pub fn advance_date(date: chrono::NaiveDate, unit: &str, every: i64) -> Option<chrono::NaiveDate> {
+    let n = every.max(1);
+    match unit {
+        "day" => date.checked_add_signed(chrono::Duration::days(n)),
+        "week" => date.checked_add_signed(chrono::Duration::days(n * 7)),
+        "month" => date.checked_add_months(chrono::Months::new(n as u32)),
+        "year" => date.checked_add_months(chrono::Months::new((n as u32) * 12)),
+        _ => None,
+    }
+}
+
+fn due_label(date: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    format!("{} {}", MONTHS_ABBR[date.month0() as usize], date.day())
+}
+
+// Scan every workspace for completed recurring tasks that haven't spawned their
+// successor yet, and create it. Returns true if anything was created.
+pub fn recurring_tick(conn: &mut Connection) -> bool {
+    let candidates: Vec<(String, String, String, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT id, workspace_id, title, metadata FROM items \
+             WHERE item_type = 'task' AND deleted = 0 AND json_valid(metadata) \
+               AND json_extract(metadata, '$.done') = 1 \
+               AND json_extract(metadata, '$.recurrence') IS NOT NULL \
+               AND json_extract(metadata, '$.recurrence') <> 'none' \
+               AND COALESCE(json_extract(metadata, '$.recurrenceSpawned'), 0) = 0",
+        ) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let rows = match stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut mutated = false;
+    for (id, ws, title, meta_s) in candidates {
+        let meta: Value = match serde_json::from_str(&meta_s) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let rec = match meta.get("recurrence") {
+            Some(r) => r,
+            None => continue,
+        };
+        // Accept both the canonical object form { unit, every } and the legacy string
+        // form ("daily"/"weekly"/"monthly"/"yearly") written by older task editors.
+        let (unit, every): (String, i64) = if let Some(s) = rec.as_str() {
+            match s {
+                "daily" => ("day".to_string(), 1),
+                "weekly" => ("week".to_string(), 1),
+                "monthly" => ("month".to_string(), 1),
+                "yearly" => ("year".to_string(), 1),
+                _ => (String::new(), 1),
+            }
+        } else {
+            (
+                rec.get("unit").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                rec.get("every").and_then(|v| v.as_i64()).unwrap_or(1),
+            )
+        };
+
+        // Base the next due on the task's dueDate; fall back to today if absent/bad.
+        let base = meta
+            .get("dueDate")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+
+        let next = match advance_date(base, &unit, every) {
+            Some(d) => d,
+            None => {
+                // Unknown unit → not a valid rule. Stamp it so we don't rescan forever.
+                stamp_spawned(conn, &id, &meta);
+                continue;
+            }
+        };
+
+        // Build the successor metadata: fresh (not done, not spawned), due advanced,
+        // recurrence carried forward so the cycle continues on the next completion.
+        let mut next_meta = meta.clone();
+        if let Some(obj) = next_meta.as_object_mut() {
+            obj.insert("done".into(), json!(false));
+            obj.insert("dueDate".into(), json!(next.format("%Y-%m-%d").to_string()));
+            obj.insert("due".into(), json!(due_label(next)));
+            obj.remove("recurrenceSpawned");
+            obj.remove("completedAt");
+        }
+
+        let ws2 = ws.clone();
+        let title2 = title.clone();
+        let nm = next_meta.to_string();
+        let created = execute_two_phase(conn, "recurring_spawn", &title2, |tx| {
+            create_item_impl(tx, ws2.clone(), title2.clone(), "task".to_string(), nm.clone())
+        });
+        if created.is_ok() {
+            stamp_spawned(conn, &id, &meta);
+            mutated = true;
+        }
+    }
+    mutated
+}
+
+// Mark a completed recurring task as having spawned its successor (idempotency flag).
+fn stamp_spawned(conn: &Connection, id: &str, meta: &Value) {
+    let mut m = meta.clone();
+    if let Some(obj) = m.as_object_mut() {
+        obj.insert("recurrenceSpawned".into(), json!(true));
+    }
+    let _ = conn.execute(
+        "UPDATE items SET metadata = ?1 WHERE id = ?2",
+        rusqlite::params![m.to_string(), id],
+    );
 }
 
 // Timestamp of the last execution ATTEMPT (any status, including SKIPPED). Scheduler
@@ -1358,6 +1501,94 @@ mod tests {
     fn stress_500_automations() { stress_scheduler(500); }
     #[test]
     fn stress_1000_automations() { stress_scheduler(1000); }
+
+    // ── Recurring tasks ───────────────────────────────────────────────────────
+    fn nd(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn advance_date_handles_each_unit_and_month_clamp() {
+        assert_eq!(advance_date(nd("2026-06-19"), "day", 1), Some(nd("2026-06-20")));
+        assert_eq!(advance_date(nd("2026-06-19"), "week", 2), Some(nd("2026-07-03")));
+        assert_eq!(advance_date(nd("2026-01-31"), "month", 1), Some(nd("2026-02-28"))); // clamp
+        assert_eq!(advance_date(nd("2026-06-19"), "year", 1), Some(nd("2027-06-19")));
+        assert_eq!(advance_date(nd("2026-06-19"), "bogus", 1), None);
+        assert_eq!(advance_date(nd("2026-06-19"), "day", 0), Some(nd("2026-06-20"))); // every<1 → 1
+    }
+
+    fn add_task(c: &Connection, meta: Value) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        c.execute(
+            "INSERT INTO items (id, workspace_id, item_type, title, metadata) VALUES (?1,'ws','task','Water plants',?2)",
+            rusqlite::params![id, meta.to_string()],
+        ).unwrap();
+        id
+    }
+
+    #[test]
+    fn recurring_done_task_spawns_next_and_stamps_original() {
+        let mut c = db();
+        let id = add_task(&c, json!({
+            "done": true, "dueDate": "2026-06-19",
+            "recurrence": { "unit": "day", "every": 2 }, "priority": "med"
+        }));
+        assert!(recurring_tick(&mut c), "spawn mutates");
+
+        // Original is stamped so it never double-spawns.
+        let orig: Value = serde_json::from_str(&c.query_row("SELECT metadata FROM items WHERE id=?1", [&id], |r| r.get::<_,String>(0)).unwrap()).unwrap();
+        assert_eq!(orig["recurrenceSpawned"], json!(true));
+
+        // Exactly one successor: not done, due advanced by the rule, recurrence carried.
+        let next: Value = serde_json::from_str(&c.query_row(
+            "SELECT metadata FROM items WHERE item_type='task' AND id<>?1 AND deleted=0", [&id], |r| r.get::<_,String>(0)).unwrap()).unwrap();
+        assert_eq!(next["done"], json!(false));
+        assert_eq!(next["dueDate"], json!("2026-06-21"));
+        assert_eq!(next["priority"], json!("med"), "fields carried forward");
+        assert!(next.get("recurrenceSpawned").is_none(), "successor is fresh");
+    }
+
+    #[test]
+    fn recurring_spawn_is_idempotent() {
+        let mut c = db();
+        add_task(&c, json!({
+            "done": true, "dueDate": "2026-06-19",
+            "recurrence": { "unit": "week", "every": 1 }
+        }));
+        recurring_tick(&mut c);
+        assert!(!recurring_tick(&mut c), "second pass spawns nothing");
+        let tasks: i64 = c.query_row("SELECT COUNT(*) FROM items WHERE item_type='task' AND deleted=0", [], |r| r.get(0)).unwrap();
+        assert_eq!(tasks, 2, "one original + one successor, no duplicates");
+    }
+
+    #[test]
+    fn legacy_string_recurrence_still_spawns() {
+        let mut c = db();
+        // Older task editors stored recurrence as a bare string.
+        add_task(&c, json!({ "done": true, "dueDate": "2026-06-19", "recurrence": "weekly" }));
+        assert!(recurring_tick(&mut c), "string 'weekly' recurrence spawns");
+        let next: Value = serde_json::from_str(&c.query_row(
+            "SELECT metadata FROM items WHERE item_type='task' AND deleted=0 AND json_extract(metadata,'$.done')=0",
+            [], |r| r.get::<_,String>(0)).unwrap()).unwrap();
+        assert_eq!(next["dueDate"], json!("2026-06-26"), "advanced one week");
+    }
+
+    #[test]
+    fn recurrence_none_string_is_ignored() {
+        let mut c = db();
+        add_task(&c, json!({ "done": true, "recurrence": "none" }));
+        assert!(!recurring_tick(&mut c), "'none' is not a recurrence");
+    }
+
+    #[test]
+    fn non_recurring_or_open_tasks_are_ignored() {
+        let mut c = db();
+        add_task(&c, json!({ "done": true })); // no recurrence
+        add_task(&c, json!({ "done": false, "recurrence": { "unit": "day", "every": 1 } })); // not done
+        assert!(!recurring_tick(&mut c), "nothing to spawn");
+        let tasks: i64 = c.query_row("SELECT COUNT(*) FROM items WHERE item_type='task' AND deleted=0", [], |r| r.get(0)).unwrap();
+        assert_eq!(tasks, 2, "no successors created");
+    }
 
     // ── Safeguard #2: run-level consistency ───────────────────────────────────
 

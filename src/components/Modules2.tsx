@@ -20,6 +20,34 @@ import { fsWriteAnyFile } from "../ipc/fs";
 import { save } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useViewMemory } from "../lib/viewMemory";
+import { buildHeatmap, toggleLogDate } from "../lib/heatmap";
+import { parseRecurrence, Recurrence } from "../lib/recurrence";
+
+// Task recurrence: the editor picks a key; we persist the canonical {unit, every}
+// object the Rust scheduler reads (automation.rs recurring_tick). "none" → cleared.
+const RECURRENCE_OPTIONS = [
+  { value: "none", label: "None" },
+  { value: "daily", label: "Daily" },
+  { value: "weekly", label: "Weekly" },
+  { value: "biweekly", label: "Every 2 weeks" },
+  { value: "monthly", label: "Monthly" },
+  { value: "yearly", label: "Yearly" },
+];
+function toRecurrence(key: string): Recurrence | null {
+  return !key || key === "none" ? null : parseRecurrence(key);
+}
+// Map a stored recurrence (object or legacy string) back to a select key.
+function recurrenceKey(rec: any): string {
+  if (!rec) return "none";
+  if (typeof rec === "string") return RECURRENCE_OPTIONS.some((o) => o.value === rec) ? rec : "none";
+  const { unit, every } = rec;
+  if (unit === "day" && every === 1) return "daily";
+  if (unit === "week" && every === 1) return "weekly";
+  if (unit === "week" && every === 2) return "biweekly";
+  if (unit === "month" && every === 1) return "monthly";
+  if (unit === "year" && every === 1) return "yearly";
+  return "none";
+}
 
 
 // Local datetime formatted as the value an <input type="datetime-local"> expects.
@@ -118,9 +146,7 @@ export function TasksModule() {
           { value: "low", label: "Low" }, { value: "med", label: "Medium" }, { value: "high", label: "High" },
         ] },
         { name: "dueDate", label: "Due date", type: "date", defaultValue: todayISO() },
-        { name: "recurrence", label: "Recurrence", type: "select", defaultValue: "none", options: [
-          { value: "none", label: "None" }, { value: "daily", label: "Daily" }, { value: "weekly", label: "Weekly" }, { value: "monthly", label: "Monthly" }
-        ] },
+        { name: "recurrence", label: "Recurrence", type: "select", defaultValue: "none", options: RECURRENCE_OPTIONS },
         { name: "project", label: "Project", defaultValue: "Inbox", placeholder: "Inbox" },
       ],
     });
@@ -140,7 +166,7 @@ export function TasksModule() {
     const cleanTitle = r.title.replace(/tomorrow/i, "").replace(/next week/i, "").trim();
 
     try {
-      await create(cleanTitle, { done: false, priority: r.priority, dueDate: finalDate, due: dueInfo(finalDate).label, recurrence: r.recurrence, project: r.project || "Inbox", subtasks: [] });
+      await create(cleanTitle, { done: false, priority: r.priority, dueDate: finalDate, due: dueInfo(finalDate).label, recurrence: toRecurrence(r.recurrence), project: r.project || "Inbox", subtasks: [] });
       toast("Task created", "ph-check-circle");
     } catch (err) {
       console.error("Failed to create task in SQLite:", err);
@@ -183,9 +209,7 @@ export function TasksModule() {
           { value: "low", label: "Low" }, { value: "med", label: "Medium" }, { value: "high", label: "High" },
         ] },
         { name: "dueDate", label: "Due date", type: "date", defaultValue: meta.dueDate || "" },
-        { name: "recurrence", label: "Recurrence", type: "select", defaultValue: meta.recurrence || "none", options: [
-          { value: "none", label: "None" }, { value: "daily", label: "Daily" }, { value: "weekly", label: "Weekly" }, { value: "monthly", label: "Monthly" }
-        ] },
+        { name: "recurrence", label: "Recurrence", type: "select", defaultValue: recurrenceKey(meta.recurrence), options: RECURRENCE_OPTIONS },
         { name: "project", label: "Project", defaultValue: meta.project },
         { name: "blockedBy", label: "Blocked By Task ID", defaultValue: meta.blockedBy || "", placeholder: "Task ID (Optional)" },
       ],
@@ -193,7 +217,7 @@ export function TasksModule() {
     if (!r) return;
     try {
       if (r.title !== item.title) await updateFields(item.id, r.title, "task");
-      await updateMeta(item.id, { ...meta, priority: r.priority, dueDate: r.dueDate, recurrence: r.recurrence, blockedBy: r.blockedBy, due: dueInfo(r.dueDate).label, project: r.project || "Inbox" });
+      await updateMeta(item.id, { ...meta, priority: r.priority, dueDate: r.dueDate, recurrence: toRecurrence(r.recurrence), blockedBy: r.blockedBy, due: dueInfo(r.dueDate).label, project: r.project || "Inbox" });
       toast("Task updated", "ph-check-circle");
     } catch (err) { console.error("Failed to edit task:", err); }
   };
@@ -348,6 +372,10 @@ export function ProjectsModule() {
     () => createProjectsViewModel({ projects: items, links, allItems }), [items, links, allItems],
   );
   const [viewMode, setViewMode] = useViewMemory("projects.viewMode", "list");
+  // Gantt zoom: scales the chart's horizontal scale so a dense roadmap can be spread
+  // out and scrolled, or pulled in to fit. Persisted per the view-memory convention.
+  const [ganttZoom, setGanttZoom] = useViewMemory("projects.ganttZoom", 1);
+  const zoomGantt = (delta: number) => setGanttZoom((z: number) => Math.min(4, Math.max(1, Math.round((z + delta) * 10) / 10)));
 
   const addMilestone = async (item: Item) => {
     const r = await modal.form({ panel: true,
@@ -463,6 +491,13 @@ export function ProjectsModule() {
           <button className={cx(viewMode === "list" && "on")} onClick={() => setViewMode("list")}>List</button>
           <button className={cx(viewMode === "gantt" && "on")} onClick={() => setViewMode("gantt")}>Gantt</button>
         </div>
+        {viewMode === "gantt" && (
+          <div className="seg" aria-label="Gantt zoom">
+            <button onClick={() => zoomGantt(-0.5)} disabled={ganttZoom <= 1} title="Zoom out"><I n="ph-minus" w="bold" /></button>
+            <button onClick={() => setGanttZoom(1)} title="Reset zoom" style={{ minWidth: 44 }}>{Math.round(ganttZoom * 100)}%</button>
+            <button onClick={() => zoomGantt(0.5)} disabled={ganttZoom >= 4} title="Zoom in"><I n="ph-plus" w="bold" /></button>
+          </div>
+        )}
         <button className="btn primary" onClick={handleNew}><I n="ph-plus" w="bold" /> New project</button>
       </PageHead>
       {!ready ? (
@@ -474,7 +509,7 @@ export function ProjectsModule() {
       ) : viewMode === "gantt" ? (
         // Enhancement 19: Gantt Chart Visualization
         <div className="fade-in" style={{ overflowX: "auto", paddingBottom: 20 }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 800 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 800 * ganttZoom }}>
             <div style={{ display: "flex", borderBottom: "1px solid var(--border)", paddingBottom: 8, color: "var(--text-faint)", fontSize: "var(--fs-sm)" }}>
               <div style={{ width: 240, flexShrink: 0 }}>Project</div>
               <div style={{ flex: 1, display: "flex", position: "relative" }}>
@@ -631,8 +666,11 @@ export function HabitsModule() {
     const streak = Math.max(0, meta.streak + (nowOn ? 1 : -1));
     const bestStreak = Math.max(meta.bestStreak, streak);
     const totalDone = Math.max(0, (meta.totalDone || 0) + (nowOn ? 1 : -1));
+    // Per-day completion log — the source for the 365-day heatmap. Kept in sync with
+    // the week/streak counters so a check-in updates both views from one click.
+    const log = toggleLogDate((meta as any).log || [], new Date());
     try {
-      await updateMeta(item.id, { ...meta, week, streak, bestStreak, totalDone });
+      await updateMeta(item.id, { ...meta, week, streak, bestStreak, totalDone, log });
       if (nowOn) {
         if (streak > 0 && streak === meta.duration) toast(`${meta.duration}-day challenge complete! 🏆`, "ph-trophy");
         else if (streak > 0 && streak % 7 === 0) toast(`${streak} day streak — keep going! 🔥`, "ph-flame");
@@ -708,6 +746,37 @@ export function HabitsModule() {
                     );
                   })}
                 </div>
+                {/* Real 365-day activity heatmap, built from the per-day completion log
+                    (GitHub-style). Empty for habits with no logged check-ins yet; it
+                    fills in from the first "Today" click. Scrolls horizontally so the
+                    full year never overflows the card. */}
+                {(() => {
+                  const hm = buildHeatmap((meta as any).log || [], { days: 365 });
+                  if (hm.total === 0) return null;
+                  return (
+                    <div style={{ marginTop: 12 }}>
+                      <div className="row gap12" style={{ marginBottom: 6 }}>
+                        <span className="mono-sm ghost" style={{ fontSize: "var(--fs-2xs)" }}>last year · {hm.total} check-ins</span>
+                        <span className="mono-sm ghost" style={{ fontSize: "var(--fs-2xs)" }}><I n="ph-flame" /> {hm.currentStreak}d now · best {hm.longestStreak}d</span>
+                      </div>
+                      <div style={{ display: "flex", gap: 2, overflowX: "auto", paddingBottom: 2 }}>
+                        {hm.weeks.map((wk, wi) => (
+                          <div key={wi} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            {wk.map((cell, ci) => (
+                              <div key={ci}
+                                title={cell.date ? `${cell.date}${cell.count ? ` · ${cell.count}` : ""}` : ""}
+                                style={{
+                                  width: 9, height: 9, borderRadius: 2,
+                                  background: cell.level === 0 ? "var(--surface-3)" : meta.color,
+                                  opacity: cell.level === 0 ? (cell.inRange ? 1 : 0.25) : 0.25 + cell.level * 0.1875,
+                                }} />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div className="row gap12" style={{ marginTop: 8 }}>
                   <span className="mono-sm ghost"><I n="ph-trophy" /> best {meta.bestStreak}</span>
                   <span className="mono-sm ghost"><I n="ph-check-circle" /> {meta.totalDone} total</span>
@@ -861,6 +930,22 @@ export function CalendarModule() {
     catch (err) { console.error("Failed to delete event:", err); }
   };
 
+  // Drag-to-unschedule: dropping a calendar block onto the Unscheduled tray removes
+  // it from the schedule. It's a soft-delete, so it's recoverable from Settings →
+  // Recovery → Deletion history if it was dropped by mistake.
+  const [unscheduleHot, setUnscheduleHot] = useState(false);
+  const handleUnschedule = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setUnscheduleHot(false);
+    const eventId = e.dataTransfer.getData("application/x-loom-event");
+    if (!eventId) return; // a dragged unscheduled task lands here = no-op
+    const ev = items.find((it) => it.id === eventId);
+    try {
+      await remove(eventId);
+      toast(`Unscheduled${ev ? ` “${ev.title}”` : ""}`, "ph-calendar-x");
+    } catch (err) { console.error("Failed to unschedule:", err); }
+  };
+
   return (
     <div className="content-pad fade-in" style={{ "--mod": "var(--h-calendar)" } as any}>
       <PageHead mod="var(--h-calendar)" icon="ph-calendar-dots" kicker="Calendar" title={headerTitle}
@@ -1012,14 +1097,18 @@ export function CalendarModule() {
           </div>
         )}
       </div>
-      {/* Enhancement 22: Time Blocking Sidebar */}
-      <div style={{ width: 260, flexShrink: 0, padding: "16px 16px", background: "var(--surface-1)", border: "1px solid var(--border)", borderRadius: "var(--r-xl)" }}>
+      {/* Enhancement 22: Time Blocking Sidebar — also the drag-to-unschedule drop zone */}
+      <div
+        onDragOver={(e) => { e.preventDefault(); if (!unscheduleHot) setUnscheduleHot(true); }}
+        onDragLeave={() => setUnscheduleHot(false)}
+        onDrop={handleUnschedule}
+        style={{ width: 260, flexShrink: 0, padding: "16px 16px", background: unscheduleHot ? "var(--accent-soft)" : "var(--surface-1)", border: `1px ${unscheduleHot ? "dashed var(--accent)" : "solid var(--border)"}`, borderRadius: "var(--r-xl)", transition: "background 0.15s, border-color 0.15s" }}>
         <h3 className="mono-sm ghost" style={{ marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
           Unscheduled Tasks
           <span className="badge">{unscheduledTasks.length}</span>
         </h3>
         <p className="ghost" style={{ fontSize: "var(--fs-sm)", marginBottom: 16 }}>
-          Drag a task onto the calendar to block time for it.
+          {unscheduleHot ? "Drop to unschedule this event." : "Drag a task onto the calendar to block time — or drag an event here to unschedule it."}
         </p>
         <div className="col gap8">
           {unscheduledTasks.slice(0, 15).map(t => (
@@ -1041,6 +1130,9 @@ export function CalendarModule() {
 function EventBlock({ b, onOpen, onDelete }: { b: any; onOpen: () => void; onDelete: (e: React.MouseEvent) => void }) {
   return (
     <div onClick={onOpen} {...clickable(onOpen)}
+      draggable
+      onDragStart={(e) => { e.dataTransfer.setData("application/x-loom-event", b.id); e.dataTransfer.effectAllowed = "move"; }}
+      title="Drag to the Unscheduled tray to unschedule"
       style={{
         position: "absolute", left: 4, right: 4, top: (b.h - 8) * 50 + 1, height: b.dur * 50 - 3,
         background: `color-mix(in oklch, ${b.color} 18%, var(--surface-3))`,
