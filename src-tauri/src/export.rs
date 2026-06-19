@@ -10,7 +10,9 @@ pub async fn export_data(app: AppHandle, state: State<'_, AppState>) -> Result<O
     // Build the snapshot under a tight lock scope; the guard is dropped before the
     // dialog opens (never held across the blocking UI call).
     let json_string = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
 
         let exported_at: String = conn
             .query_row("SELECT CURRENT_TIMESTAMP", [], |r| r.get(0))
@@ -137,8 +139,12 @@ pub async fn export_data(app: AppHandle, state: State<'_, AppState>) -> Result<O
             "settings": settings,
             "dashboard_widgets": dashboard_widgets,
         });
-        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?
-    };
+        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+    
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)?
+};
 
     // Native save dialog. async command → runs off the main thread → blocking call is safe.
     let picked = app
@@ -183,10 +189,16 @@ pub async fn backup_database(app: AppHandle, state: State<'_, AppState>) -> Resu
     let escaped = dest_str.replace('\'', "''");
     let sql = format!("VACUUM INTO '{}'", escaped);
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     conn.execute_batch(&sql).map_err(|e| e.to_string())?;
 
     Ok(Some(dest_str))
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // Import ─ the inverse of `export_data`. Reads a LOOM JSON export and merges it into
@@ -222,7 +234,9 @@ pub async fn import_data(app: AppHandle, state: State<'_, AppState>) -> Result<O
     // Whole merge runs in ONE transaction. A crash or any failing insert mid-import
     // rolls the entire thing back (SQLite discards an uncommitted WAL txn on the next
     // open), so an interrupted import can never leave a half-restored DB.
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let (ws_count, it_count, lk_count) = import_into_tx(&tx, &doc)?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -230,6 +244,10 @@ pub async fn import_data(app: AppHandle, state: State<'_, AppState>) -> Result<O
     Ok(Some(format!(
         "Imported {ws_count} workspaces, {it_count} items, {lk_count} links."
     )))
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // The merge itself — pure DB, no dialog/AppHandle — so crash/atomicity behaviour is

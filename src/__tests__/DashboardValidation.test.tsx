@@ -32,6 +32,7 @@ vi.mock("../ipc/workspaces", () => ({
 vi.mock("../ipc/links", () => ({
   getLinks: vi.fn(async () => []),
   createLink: vi.fn(),
+  getAllLinks: vi.fn(async () => []),
 }));
 
 vi.mock("../ipc/fs", () => ({
@@ -79,6 +80,8 @@ describe("Phase 5 Dashboard React Runtime Validation", () => {
     setAccent: vi.fn(),
     dragTargetId: null,
     setDragTargetId: vi.fn(),
+    navStyle: "sidebar" as const,
+    setNavStyle: vi.fn(),
   };
 
   const TestApp = ({ editing = false }: { editing?: boolean }) => (
@@ -137,5 +140,97 @@ describe("Phase 5 Dashboard React Runtime Validation", () => {
     });
 
     expect((window as any).__loomInternalDrag).toBe(false);
+  });
+
+  it("3. Seeding validation: Does not seed mock data on first launch or empty database", async () => {
+    (itemsIpc.getDashboardLayout as any).mockResolvedValueOnce([]);
+    render(<TestApp />);
+    // Verify that createItem is never called, showing seeding is disabled when DB is empty.
+    await waitFor(() => {
+      expect(itemsIpc.createItem).not.toHaveBeenCalled();
+    });
+  });
+
+  it("4. Performance Optimization: Drag updates DOM style directly but does not compute layout until crossing grid boundaries", async () => {
+    const layout = [
+      { id: "w_0", workspace_id: "ws_a", widget_type: "tasks", x: 0, y: 0, w: 4, h: 2, hidden: false }
+    ];
+    (itemsIpc.getDashboardLayout as any).mockResolvedValueOnce(layout);
+    
+    const { container } = render(<TestApp editing={true} />);
+    await waitFor(() => expect(document.querySelector(".grab")).not.toBeNull());
+
+    const grabHandle = document.querySelector(".grab") as Element;
+    const widgetElement = container.querySelector("#widget-w_0") as HTMLElement;
+    expect(widgetElement).not.toBeNull();
+
+    // Mock getBoundingClientRect for both grid and widget
+    const gridElement = container.querySelector(".dash-grid") as HTMLElement;
+    vi.spyOn(gridElement, "getBoundingClientRect").mockReturnValue({
+      width: 1200,
+      height: 600,
+      left: 0,
+      top: 0,
+      right: 1200,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => {}
+    });
+
+    vi.spyOn(widgetElement, "getBoundingClientRect").mockReturnValue({
+      width: 400,
+      height: 200,
+      left: 0,
+      top: 0,
+      right: 400,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => {}
+    });
+
+    // Start dragging
+    act(() => {
+      fireEvent.pointerDown(grabHandle, { clientX: 50, clientY: 50 });
+    });
+
+    // Verify it set internal drag flag
+    expect((window as any).__loomInternalDrag).toBe(true);
+
+    // Let's drag slightly by 8px (which is less than boundary crossing and snap)
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 58, clientY: 50 });
+    });
+
+    // Cell calculation:
+    // cellW = (1200 + 16) / 12 = 101.33px
+    // deltaX = 8px, grabX = 50px
+    // x = Math.round((58 - 0 - 50) / 101.33) = 0
+    // Visual translation: snapDx = Math.round(8/20)*20 = 0px
+    expect(widgetElement.style.transform).toBe("translate(0px, 0px)");
+
+    // Move clientX to 75 -> deltaX = 25 -> snapDx = 20
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 75, clientY: 50 });
+    });
+    expect(widgetElement.style.transform).toBe("translate(20px, 0px)");
+
+    // Now move clientX to 160 (so deltaX = 110. grabX is 50. clientX - grabX = 110. 110 / 101.33 = 1.08 -> round is 1)
+    // Grid cell x becomes 1. This crosses grid boundary!
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 160, clientY: 50 });
+    });
+
+    // DOM transform should update: deltaX = 110 -> snapDx = Math.round(110 / 20) * 20 = 120px
+    expect(widgetElement.style.transform).toBe("translate(120px, 0px)");
+
+    // Clean up pointerup
+    act(() => {
+      fireEvent.pointerUp(window);
+    });
+
+    expect(widgetElement.style.transform).toBe("");
+    expect(widgetElement.style.zIndex).toBe("");
   });
 });

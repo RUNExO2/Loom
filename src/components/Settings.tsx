@@ -5,13 +5,16 @@ import {
   FONTS, getFontPref, setFontPref, applyFont,
   getDensityPref, setDensityPref, applyDensity,
   getAmbientPref, setAmbientPref, applyAmbient,
+  getAcrylicPref, setAcrylicPref, applyAcrylic,
+  NavStyle,
 } from "../lib/settings";
 import { useItemStore } from "../lib/itemStore";
 import { defaultDashboardLayout } from "./Dashboard";
 import { optimizeDatabase, importNotesFromFolder } from "../ipc/content";
 import { open } from "@tauri-apps/plugin-dialog";
-import { exportData, backupDatabase, importData } from "../ipc/settings";
+import { exportData, backupDatabase, importData, clearAllUserData } from "../ipc/settings";
 import { useModal } from "./Modal";
+import { mutationEngine } from "../lib/mutationEngine";
 import { Button } from "./ui/Button";
 import { ThemeStudio } from "./ThemeStudio";
 import { AnimatePresence } from "framer-motion";
@@ -35,32 +38,42 @@ function Section({ icon, title, sub, danger, children }: { icon: string; title: 
 }
 
 export function SettingsModule() {
-  const { toast, themePref, setTheme, accent, setAccent } = useLoom();
+  const { toast, themePref, setTheme, accent, setAccent, navStyle, setNavStyle } = useLoom();
   const modal = useModal();
   const { workspaceId, saveDashboard, refresh } = useItemStore();
   const [startup, setStartup] = useState<string>("dashboard");
   const [busy, setBusy] = useState<string | null>(null);
   const [font, setFont] = useState<string>("inter");
-  const [condensed, setCondensed] = useState<boolean>(false);
+  const [density, setDensity] = useState<string>("comfortable");
   const [ambient, setAmbient] = useState<boolean>(false);
+  const [acrylic, setAcrylicState] = useState<boolean>(false);
   const [themeStudio, setThemeStudio] = useState(false);
 
   useEffect(() => {
     getStartupView().then(setStartup);
     getFontPref().then(setFont);
-    getDensityPref().then(setCondensed);
+    getDensityPref().then(setDensity);
     getAmbientPref().then(setAmbient);
+    getAcrylicPref().then(setAcrylicState);
   }, []);
 
   const chooseFont = (id: string) => {
     setFont(id); applyFont(id); setFontPref(id);
     toast(`Font: ${FONTS.find((f) => f.id === id)?.label ?? id}`, "ph-text-aa");
   };
-  const toggleCondensed = (on: boolean) => {
-    setCondensed(on); applyDensity(on); setDensityPref(on);
+  const chooseDensity = (mode: import("../lib/settings").DensityMode) => {
+    setDensity(mode); applyDensity(mode); setDensityPref(mode);
   };
   const toggleAmbient = (on: boolean) => {
     setAmbient(on); applyAmbient(on); setAmbientPref(on);
+  };
+  const toggleAcrylic = (on: boolean) => {
+    setAcrylicState(on); applyAcrylic(on); setAcrylicPref(on);
+    toast(on ? "Acrylic mode enabled" : "Acrylic mode disabled", "ph-drop-half");
+  };
+  const chooseNavStyle = (style: NavStyle) => {
+    setNavStyle(style);
+    toast(style === "top-pill" ? "Switched to top pill navigation" : "Switched to sidebar navigation", "ph-list");
   };
 
   const onOptimizeDb = async () => {
@@ -105,6 +118,38 @@ export function SettingsModule() {
     if (!workspaceId) return;
     await saveDashboard(defaultDashboardLayout(workspaceId));
     toast("Dashboard layout reset", "ph-arrow-counter-clockwise");
+  };
+
+  const onClearAppData = async () => {
+    const ok = await modal.confirm({
+      title: "Clear App Data",
+      message: "Permanently delete all user-generated runtime data (Notes, widgets, local state)? This will reset the app to a fresh state and CANNOT be undone.",
+      icon: "ph-trash",
+      danger: true,
+      confirmLabel: "Delete All Data",
+    });
+    if (!ok) return;
+    
+    setBusy("clearing");
+    try {
+      // Step 0: Freeze all frontend systems before making ANY backend calls
+      mutationEngine.freeze();
+
+      // Step 1-7: The backend wipe (includes backend system freeze)
+      await clearAllUserData();
+
+      // Clear all transient caches
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+
+      // Reboot. Unfreeze happens after rehydration in ItemStore.
+      window.location.reload();
+    } catch (e) {
+      console.error("Clear app data failed:", e);
+      toast("Failed to clear app data", "ph-warning");
+      mutationEngine.unfreeze(); // Safe recovery
+      setBusy(null);
+    }
   };
 
   const onExport = async () => {
@@ -246,12 +291,14 @@ export function SettingsModule() {
           </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
-              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>High-Density "Condensed" Mode</div>
-              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Shrink padding and fonts for maximum data density.</div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Density Mode</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Adjust spacing to comfortable, compact, or dense.</div>
             </div>
-            <Switch.Root className="rx-switch" checked={condensed} onCheckedChange={toggleCondensed} aria-label="Condensed mode">
-              <Switch.Thumb className="rx-switch-thumb" />
-            </Switch.Root>
+            <select className="rx-select" value={density} style={{ padding: "4px 8px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", color: "var(--text)" }} onChange={(e) => chooseDensity(e.target.value as any)}>
+              <option value="comfortable">Comfortable</option>
+              <option value="compact">Compact</option>
+              <option value="dense">Dense</option>
+            </select>
           </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
@@ -261,6 +308,39 @@ export function SettingsModule() {
             <Switch.Root className="rx-switch" checked={ambient} onCheckedChange={toggleAmbient} aria-label="Ambient background">
               <Switch.Thumb className="rx-switch-thumb" />
             </Switch.Root>
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Acrylic Mode</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Frosted glass surfaces on cards, navigation, popovers, modals, and menus.</div>
+            </div>
+            <Switch.Root className="rx-switch" checked={acrylic} onCheckedChange={toggleAcrylic} aria-label="Acrylic mode">
+              <Switch.Thumb className="rx-switch-thumb" />
+            </Switch.Root>
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Navigation Layout</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Switch between sidebar and top pill navigation. Routes and permissions are identical.</div>
+            </div>
+            <div className="seg" role="group" aria-label="Navigation style">
+              <button
+                id="nav-style-sidebar-btn"
+                className={cx(navStyle === "sidebar" && "on")}
+                onClick={() => chooseNavStyle("sidebar")}
+                aria-pressed={navStyle === "sidebar"}
+              >
+                <I n="ph-sidebar-simple" /> Sidebar
+              </button>
+              <button
+                id="nav-style-top-pill-btn"
+                className={cx(navStyle === "top-pill" && "on")}
+                onClick={() => chooseNavStyle("top-pill")}
+                aria-pressed={navStyle === "top-pill"}
+              >
+                <I n="ph-dots-three-outline" /> Top Pill
+              </button>
+            </div>
           </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
@@ -392,6 +472,16 @@ export function SettingsModule() {
           </div>
           <Button variant="destructive" iconLeft="ph-arrow-counter-clockwise" onClick={onReset}>
             Reset layout
+          </Button>
+        </div>
+        <div className="divider" style={{ margin: "16px 0", background: "var(--border)" }}></div>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Clear App Data (Dev Cleanup)</div>
+            <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Permanently delete all user-generated runtime data (Notes, widgets, local state). Does not affect codebase.</div>
+          </div>
+          <Button variant="destructive" iconLeft="ph-trash" loading={busy === "clearing"} onClick={onClearAppData}>
+            Clear Data
           </Button>
         </div>
       </Section>

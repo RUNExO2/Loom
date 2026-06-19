@@ -14,7 +14,22 @@ export interface Mutation {
 }
 
 class MutationEngine {
+  private frozen: boolean = false;
+
+  public freeze() {
+    this.frozen = true;
+  }
+
+  public unfreeze() {
+    this.frozen = false;
+  }
+
   public async executeMutation(name: string, steps: MutationStep[]): Promise<any> {
+    if (this.frozen) {
+      console.warn(`Blocked mutation [${name}] because the system is frozen.`);
+      throw new Error(`System is frozen. Cannot execute: ${name}`);
+    }
+
     const mutation: Mutation = {
       id: Math.random().toString(36).substring(2),
       name,

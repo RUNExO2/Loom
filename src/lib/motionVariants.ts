@@ -12,11 +12,11 @@ export const springFast: Transition = { type: "spring", stiffness: 520, damping:
 export const springBase: Transition = { type: "spring", stiffness: 400, damping: 30 };
 export const springSoft: Transition = { type: "spring", stiffness: 260, damping: 26 };
 
-// Route/page transitions: fade + y(8→0), 250ms enter
+// Route/page transitions: soft fade + slight scale + subtle slide
 export const pageVariants: Variants = {
-  initial: { opacity: 0, y: 8 },
-  enter: { opacity: 1, y: 0, transition: { duration: 0.25, ease: [0.16, 1, 0.3, 1] } },
-  exit: { opacity: 0, y: -4, transition: { duration: 0.12, ease: "easeIn" } },
+  initial: { opacity: 0, y: 12, scale: 0.98 },
+  enter: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.3, ease: [0.16, 1, 0.3, 1] } },
+  exit: { opacity: 0, y: -8, scale: 0.99, transition: { duration: 0.15, ease: "easeIn" } },
 };
 
 // List containers stagger their children by 40ms
@@ -40,6 +40,11 @@ export const modalVariants: Variants = {
   enter: { opacity: 1, y: 0, scale: 1, transition: springBase },
   exit: { opacity: 0, y: 8, scale: 0.985, transition: { duration: 0.14, ease: "easeIn" } },
 };
+export const panelVariants: Variants = {
+  initial: { opacity: 0, x: 24, scale: 0.98 },
+  enter: { opacity: 1, x: 0, scale: 1, transition: springFast },
+  exit: { opacity: 0, x: 16, scale: 0.99, transition: { duration: 0.18, ease: "easeIn" } },
+};
 
 // Toast entry from bottom-right, exit slide out
 export const toastVariants: Variants = {
@@ -49,6 +54,6 @@ export const toastVariants: Variants = {
 };
 
 // Interactive element presets
-export const cardHover = { y: -2 };
-export const cardTap = { scale: 0.98 };
-export const buttonTap = { scale: 0.97 };
+export const cardHover = { y: -2, transition: springFast };
+export const cardTap = { scale: 0.98, transition: springFast };
+export const buttonTap = { scale: 0.96, transition: springFast };

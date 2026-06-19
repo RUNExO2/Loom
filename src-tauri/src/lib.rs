@@ -11,9 +11,12 @@ mod crypto_commands;
 use database::init_db;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub static SYSTEM_FROZEN: AtomicBool = AtomicBool::new(false);
 
 pub struct AppState {
-    pub db: Mutex<rusqlite::Connection>,
+    pub db: tokio_rusqlite::Connection,
     // Path to the SQLite file. The automation engine and scheduler open their own
     // connections to it (WAL) so they never re-enter the command Mutex.
     pub db_path: String,
@@ -69,9 +72,14 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => println!("WARNING: pending FS op recovery failed: {}", e),
             }
+            
+            drop(conn);
+            let t_db = tauri::async_runtime::block_on(async {
+                tokio_rusqlite::Connection::open(&db_path_str).await.expect("Failed to open async db")
+            });
 
             let state = AppState {
-                db: Mutex::new(conn),
+                db: t_db,
                 db_path: db_path_str.clone(),
                 app_handle: app.handle().clone(),
             };
@@ -81,9 +89,11 @@ pub fn run() {
             // Reconcile filesystem indexes on startup
             let app_handle = app.handle().clone();
             let state_ref = app.handle().state::<AppState>();
-            if let Err(e) = fs_commands::fs_reconcile(state_ref, app_handle.clone()) {
-                println!("WARNING: Startup filesystem reconciliation failed: {}", e);
-            }
+            tauri::async_runtime::block_on(async move {
+                if let Err(e) = fs_commands::fs_reconcile(state_ref, app_handle).await {
+                    println!("WARNING: Startup filesystem reconciliation failed: {}", e);
+                }
+            });
 
             // Automation scheduler — own SQLite connection (WAL), fixed 30s tick.
             // Drives interval/daily triggers off persisted execution timestamps, so
@@ -92,6 +102,9 @@ pub fn run() {
             let sched_app = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_secs(30));
+                if crate::SYSTEM_FROZEN.load(Ordering::SeqCst) {
+                    continue;
+                }
                 if let Ok(mut conn) = automation::open_engine_conn(&sched_db) {
                     // Reconcile the frontend cache only when a scheduled run mutated data.
                     if automation::scheduler_tick(&mut conn) {

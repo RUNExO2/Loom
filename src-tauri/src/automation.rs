@@ -1521,20 +1521,27 @@ pub struct AutomationStats {
 // Manually fire an automation now (Manual Trigger, Phase 4). Runs synchronously
 // on the command connection so the caller gets the resulting execution id.
 #[tauri::command]
-pub fn run_automation_now(state: State<'_, AppState>, id: String) -> Result<String, String> {
+pub async fn run_automation_now(state: State<'_, AppState>, id: String) -> Result<String, String> {
     // Read the rule under the lock, then DROP it before running. Actions can sleep
     // (delay/wait, up to 10s each) — holding state.db across that would freeze every
     // other IPC command, including the SplitBrainVerifier's get_system_state poll.
+    let id_clone = id.clone();
     let (title, ws, meta_s): (String, String, String) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
         conn.query_row(
             "SELECT title, workspace_id, metadata FROM items \
              WHERE id = ? AND item_type = 'automation' AND deleted = 0",
-            [&id],
+            [&id_clone],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .map_err(|_| format!("automation '{}' not found", id))?
-    };
+        .map_err(|_| format!("automation '{}' not found", id_clone))
+    
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)?
+};
     let meta: Value = serde_json::from_str(&meta_s).unwrap_or_else(|_| json!({}));
     let auto = Automation { id: id.clone(), title: title.clone(), meta };
     let ev = Event {
@@ -1568,7 +1575,7 @@ pub fn run_automation_now(state: State<'_, AppState>, id: String) -> Result<Stri
 // Backend-originated event injection (e.g. ApplicationStarted from the frontend
 // boot path, or command-palette manual events). Dispatched on the engine conn.
 #[tauri::command]
-pub fn emit_event(
+pub async fn emit_event(
     state: State<'_, AppState>,
     name: String,
     workspace_id: String,
@@ -1587,12 +1594,14 @@ pub fn emit_event(
 }
 
 #[tauri::command]
-pub fn get_automation_executions(
+pub async fn get_automation_executions(
     state: State<'_, AppState>,
     automation_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<ExecutionRow>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let lim = limit.unwrap_or(100).clamp(1, 1000);
     let mut rows = Vec::new();
     let map = |r: &rusqlite::Row| -> rusqlite::Result<ExecutionRow> {
@@ -1634,14 +1643,20 @@ pub fn get_automation_executions(
         }
     }
     Ok(rows)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn get_automation_stats(
+pub async fn get_automation_stats(
     state: State<'_, AppState>,
     automation_id: Option<String>,
 ) -> Result<AutomationStats, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let (where_clause, has_filter) = match &automation_id {
         Some(_) => (" WHERE automation_id = ?1", true),
         None => ("", false),
@@ -1707,4 +1722,8 @@ pub fn get_automation_stats(
         success_rate,
         last_execution: last,
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }

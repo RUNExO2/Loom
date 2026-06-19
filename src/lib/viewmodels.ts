@@ -194,7 +194,7 @@ export function createTasksViewModel(
   const byId = indexById(state.allItems);
   const rows: TaskRow[] = state.tasks.map((t) => {
     const meta = getTaskMeta(t);
-    const di = dueInfo(meta.dueDate);
+    const di = dueInfo(meta.dueDate, now);
     const subs = meta.subtasks || [];
     const subDone = subs.filter((s) => s.done).length;
     return {

@@ -36,11 +36,11 @@ export const getTaskMeta = (item: Item): TaskMetadata => {
 };
 
 // Turn an ISO date into a friendly relative label + overdue flag (local time).
-export function dueInfo(dueDate?: string): { label: string; overdue: boolean; soon: boolean } {
+export function dueInfo(dueDate?: string, todayDate?: Date): { label: string; overdue: boolean; soon: boolean } {
   if (!dueDate) return { label: "No date", overdue: false, soon: false };
   const d = new Date(dueDate + "T00:00:00");
   if (isNaN(d.getTime())) return { label: dueDate, overdue: false, soon: false };
-  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const today = todayDate ? new Date(todayDate) : new Date(); today.setHours(0, 0, 0, 0);
   const diff = Math.round((d.getTime() - today.getTime()) / 86400000);
   let label: string;
   if (diff === 0) label = "Today";

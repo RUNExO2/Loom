@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { scrimVariants, modalVariants } from "../lib/motionVariants";
+import { scrimVariants, modalVariants, panelVariants } from "../lib/motionVariants";
 import { I, cx } from "../lib/context";
 import { Button } from "./ui/Button";
 
@@ -25,6 +25,7 @@ export interface FormConfig {
   icon?: string;
   accent?: string;       // --mod color for the header glyph + focus ring tint
   submitLabel?: string;
+  panel?: boolean;       // If true, render as a slide-over context panel
   fields: ModalField[];
 }
 export interface ConfirmConfig {
@@ -92,8 +93,9 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
 // Shared Radix + motion chrome. Radix supplies role="dialog", aria-modal,
 // labelling, the focus trap, Escape, and outside-click dismissal; the wrapper
 // is pointer-events:none so backdrop clicks land on the Overlay (= outside).
-function ModalShell({ mod, onDismiss, onOpenAutoFocus, children }: {
+function ModalShell({ mod, panel, onDismiss, onOpenAutoFocus, children }: {
   mod: string;
+  panel?: boolean;
   onDismiss: () => void;
   onOpenAutoFocus?: (e: Event) => void;
   children: React.ReactNode;
@@ -105,8 +107,8 @@ function ModalShell({ mod, onDismiss, onOpenAutoFocus, children }: {
           <motion.div className="modal-scrim" variants={scrimVariants} initial="initial" animate="enter" exit="exit" />
         </Dialog.Overlay>
         <Dialog.Content asChild forceMount onOpenAutoFocus={onOpenAutoFocus}>
-          <motion.div className="modal-wrap" variants={modalVariants} initial="initial" animate="enter" exit="exit">
-            <div className="modal" style={{ "--mod": mod } as any}>
+          <motion.div className={panel ? "panel-wrap" : "modal-wrap"} variants={panel ? panelVariants : modalVariants} initial="initial" animate="enter" exit="exit">
+            <div className={panel ? "panel" : "modal"} style={{ "--mod": mod } as any}>
               {children}
             </div>
           </motion.div>
@@ -152,6 +154,7 @@ function FormModal({ cfg, onDone }: { cfg: FormConfig; onDone: (v: Record<string
   return (
     <ModalShell
       mod={cfg.accent || "var(--accent)"}
+      panel={cfg.panel}
       onDismiss={() => onDone(null)}
       onOpenAutoFocus={(e) => { e.preventDefault(); firstRef.current?.focus(); firstRef.current?.select?.(); }}
     >

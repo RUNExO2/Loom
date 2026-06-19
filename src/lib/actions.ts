@@ -10,7 +10,7 @@ import { Item } from "../ipc/items";
 // navigation (no fake side effects, no toast-only stubs). Actions are pure data +
 // a closure — `buildActions` is unit-testable with mock deps.
 
-export type ActionSection = "Create" | "General";
+export type ActionSection = "Create" | "General" | "Workspace" | "Layout";
 
 export interface Action {
   id: string;
@@ -31,6 +31,8 @@ export interface ActionDeps {
   editDash: () => void;
   showShortcuts: () => void;
   toggleTheme: () => void;
+  setNavStyle?: (style: "sidebar" | "top-pill") => void;
+  setDensity?: (mode: import("./settings").DensityMode) => void;
 }
 
 // The create→navigate→inspect→toast sequence every "new X" action shares: a real
@@ -121,6 +123,63 @@ export function buildActions(d: ActionDeps): Action[] {
       id: "cmd-shortcuts", title: "Keyboard Shortcuts", icon: "ph-keyboard", color: "var(--text-faint)",
       section: "General", keywords: "shortcuts keys help bindings",
       run: () => d.showShortcuts(),
+    },
+    // --- WORKSPACE PRESETS ---
+    {
+      id: "cmd-ws-focus", title: "Workspace: Focus", icon: "ph-target", color: "var(--accent)",
+      section: "Workspace", keywords: "focus workspace preset productivity dense hide sidebar",
+      run: () => {
+        d.setNavStyle?.("top-pill");
+        d.setDensity?.("dense");
+        d.navigate("dashboard");
+        d.toast("Focus workspace active", "ph-target");
+      },
+    },
+    {
+      id: "cmd-ws-research", title: "Workspace: Research", icon: "ph-flask", color: "var(--h-bookmarks)",
+      section: "Workspace", keywords: "research bookmarks library notes split",
+      run: () => {
+        d.setNavStyle?.("sidebar");
+        d.setDensity?.("comfortable");
+        d.navigate("bookmarks");
+        d.toast("Research workspace active", "ph-flask");
+      },
+    },
+    {
+      id: "cmd-ws-planning", title: "Workspace: Planning", icon: "ph-kanban", color: "var(--h-projects)",
+      section: "Workspace", keywords: "planning projects tasks compact",
+      run: () => {
+        d.setNavStyle?.("sidebar");
+        d.setDensity?.("compact");
+        d.navigate("projects");
+        d.toast("Planning workspace active", "ph-kanban");
+      },
+    },
+    {
+      id: "cmd-ws-reading", title: "Workspace: Reading", icon: "ph-book-open", color: "var(--h-library)",
+      section: "Workspace", keywords: "reading books library comfortable serif",
+      run: () => {
+        d.setNavStyle?.("top-pill");
+        d.setDensity?.("comfortable");
+        d.navigate("library");
+        d.toast("Reading workspace active", "ph-book-open");
+      },
+    },
+    // --- DENSITY MODES ---
+    {
+      id: "cmd-density-comfortable", title: "Density: Comfortable", icon: "ph-arrows-out", color: "var(--text-faint)",
+      section: "Layout", keywords: "density comfortable spacious loose",
+      run: () => { d.setDensity?.("comfortable"); d.toast("Comfortable density", "ph-arrows-out"); }
+    },
+    {
+      id: "cmd-density-compact", title: "Density: Compact", icon: "ph-arrows-in", color: "var(--text-faint)",
+      section: "Layout", keywords: "density compact medium normal",
+      run: () => { d.setDensity?.("compact"); d.toast("Compact density", "ph-arrows-in"); }
+    },
+    {
+      id: "cmd-density-dense", title: "Density: Dense", icon: "ph-arrows-in-line-horizontal", color: "var(--text-faint)",
+      section: "Layout", keywords: "density dense tight compact high",
+      run: () => { d.setDensity?.("dense"); d.toast("Dense density", "ph-arrows-in-line-horizontal"); }
     },
   ];
 }

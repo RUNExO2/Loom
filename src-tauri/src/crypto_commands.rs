@@ -169,7 +169,7 @@ fn is_encrypted_bytes(data: &[u8]) -> bool {
 }
 
 #[tauri::command]
-pub fn is_file_encrypted(path: String) -> Result<bool, String> {
+pub async fn is_file_encrypted(path: String) -> Result<bool, String> {
     let p = Path::new(&path);
     if !p.exists() {
         return Ok(false);
@@ -200,7 +200,7 @@ fn from_hex(s: &str) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
-pub fn encrypt_vault_value(plaintext: String, password: String) -> Result<String, String> {
+pub async fn encrypt_vault_value(plaintext: String, password: String) -> Result<String, String> {
     if password.is_empty() {
         return Err("Password is required.".into());
     }
@@ -225,7 +225,7 @@ pub fn encrypt_vault_value(plaintext: String, password: String) -> Result<String
 }
 
 #[tauri::command]
-pub fn decrypt_vault_value(ciphertext_str: String, password: String) -> Result<String, String> {
+pub async fn decrypt_vault_value(ciphertext_str: String, password: String) -> Result<String, String> {
     if password.is_empty() {
         return Err("Password is required.".into());
     }

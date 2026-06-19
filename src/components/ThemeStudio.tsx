@@ -11,7 +11,10 @@ import {
   contrastRatio, wcagRating, themeSwatch, themeToCss,
 } from "../lib/theme";
 import { save, open } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { fsWriteAnyFile, fsReadNoteContent } from "../ipc/fs";
+import { getBackgroundConfig, setBackgroundConfig, BackgroundConfig, applyBackgroundConfig } from "../lib/settings";
+import { processBackground } from "../lib/backgroundEngine";
 
 // Representative base value per field (for picker seeds, hex placeholders, contrast).
 const FIELD_DEFAULT: Record<string, string> = {};
@@ -42,13 +45,15 @@ function glowFor(key: string): string {
 // Full theme customiser. Edits live-apply to the running app (no restart) and stream into
 // the on-canvas specimen; disabling instantly reverts to the active base theme.
 export function ThemeStudio({ onClose }: { onClose: () => void }) {
-  const { toast } = useLoom();
+  const { toast, navStyle, setNavStyle } = useLoom();
   const modal = useModal();
   const [enabled, setEnabled] = useState(false);
   const [themes, setThemes] = useState<CustomTheme[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [hi, setHi] = useState<string | null>(null);   // highlighted region in the specimen
+  const [bg, setBg] = useState<BackgroundConfig | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const current = themes.find((t) => t.id === activeId) || null;
 
@@ -58,6 +63,7 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
       if (list.length === 0) { const t = newTheme("My theme"); list = [t]; aid = t.id; }
       setThemes(list); setActiveId(aid); setEnabled(st.enabled); setLoaded(true);
     });
+    getBackgroundConfig().then(setBg);
   }, []);
 
   // Live preview  -  re-apply to the running app whenever toggle, active theme, or tokens change.
@@ -98,7 +104,7 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
   };
   const rename = async () => {
     if (!current) return;
-    const r = await modal.form({ title: "Rename theme", icon: "ph-pencil", accent: "var(--accent)", submitLabel: "Rename", fields: [{ name: "name", label: "Name", defaultValue: current.name, required: true }] });
+    const r = await modal.form({ panel: true, title: "Rename theme", icon: "ph-pencil", accent: "var(--accent)", submitLabel: "Rename", fields: [{ name: "name", label: "Name", defaultValue: current.name, required: true }] });
     if (!r) return;
     setThemes(themes.map((t) => (t.id === current.id ? { ...t, name: r.name } : t)));
   };
@@ -152,6 +158,44 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
       modal.confirm({ title: "Import failed", message: String(e), icon: "ph-warning", danger: true, confirmLabel: "OK" });
     }
   };
+
+  const handlePickBg = async () => {
+    try {
+      const sel = await open({ multiple: false, filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "webp"] }] });
+      if (!sel || typeof sel !== "string") return;
+      setIsProcessing(true);
+      const url = convertFileSrc(sel);
+      try {
+        const profile = await processBackground(url);
+        const newBg = { ...bg!, bgImage: url, profile };
+        setBg(newBg);
+        await setBackgroundConfig(newBg);
+        applyBackgroundConfig(newBg);
+        toast("Background processed and applied", "ph-image");
+      } catch (err) {
+        toast("Failed to process image", "ph-warning");
+      } finally {
+        setIsProcessing(false);
+      }
+    } catch {}
+  };
+
+  const updateBg = async (patch: Partial<BackgroundConfig>) => {
+    if (!bg) return;
+    const newBg = { ...bg, ...patch };
+    setBg(newBg);
+    await setBackgroundConfig(newBg);
+    applyBackgroundConfig(newBg);
+  };
+
+  const clearBg = async () => {
+    if (!bg) return;
+    const newBg = { ...bg, bgImage: null, profile: null };
+    setBg(newBg);
+    await setBackgroundConfig(newBg);
+    applyBackgroundConfig(newBg);
+  };
+
   const copyCss = async () => {
     if (!current) return;
     try {
@@ -224,6 +268,86 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            {/* Background System */}
+            {bg && (
+              <div className="ts-group">
+                <div className="ts-group-h"><I n="ph-image" /> Background System</div>
+                
+                <div className="ts-field">
+                  <div className="ts-field-tx">
+                    <div className="l">Background Image</div>
+                    <div className="h">Select an image for the Premium Background Engine.</div>
+                  </div>
+                  <div className="ts-ctl" style={{ gap: 8 }}>
+                    {isProcessing ? <span className="mono-sm ghost">Processing...</span> :
+                     bg.bgImage ? (
+                      <>
+                        <span className="mono-sm" title={bg.bgImage} style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {bg.bgImage.split(/[\/\\]/).pop()}
+                        </span>
+                        <button className="btn sm" onClick={clearBg} title="Remove background"><I n="ph-x" /> Clear</button>
+                      </>
+                    ) : (
+                      <button className="btn sm" onClick={handlePickBg}><I n="ph-image" /> Browse</button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="ts-field">
+                  <div className="ts-field-tx">
+                    <div className="l">Readability Engine</div>
+                    <div className="h">Dynamic background blurring and darkening for UI contrast.</div>
+                  </div>
+                  <Switch.Root className="rx-switch" checked={bg.bgDynamic} onCheckedChange={(v) => updateBg({ bgDynamic: v })} disabled={!bg.bgImage}>
+                    <Switch.Thumb className="rx-switch-thumb" />
+                  </Switch.Root>
+                </div>
+
+                <div className="ts-field">
+                  <div className="ts-field-tx">
+                    <div className="l">Extract Palette</div>
+                    <div className="h">Use image colors for the app accent and surface tint.</div>
+                  </div>
+                  <div className="ts-ctl">
+                    <button className={cx("btn sm", bg.bgUseColors && "active")} onClick={() => updateBg({ bgUseColors: !bg.bgUseColors })}>
+                      <I n={bg.bgUseColors ? "ph-check-circle" : "ph-circle"} /> Extract Colors
+                    </button>
+                  </div>
+                </div>
+
+                <div className="ts-field">
+                  <div className="ts-field-tx">
+                    <div className="l">Enable Parallax</div>
+                    <div className="h">Slightly shift the background with mouse movement.</div>
+                  </div>
+                  <Switch.Root className="rx-switch" checked={bg.bgParallax} onCheckedChange={(v) => updateBg({ bgParallax: v })} disabled={!bg.bgImage}>
+                    <Switch.Thumb className="rx-switch-thumb" />
+                  </Switch.Root>
+                </div>
+              </div>
+            )}
+
+            {/* Navigation System */}
+            <div className="ts-group">
+              <div className="ts-group-h"><I n="ph-layout" /> Navigation System</div>
+              <div className="ts-field">
+                <div className="ts-field-tx">
+                  <div className="l">Navigation Style</div>
+                  <div className="h">Choose between a traditional sidebar or compact titlebar pills.</div>
+                </div>
+                <div className="ts-ctl" style={{ gap: 8 }}>
+                  <div className="modal-seg">
+                    <button className={cx(navStyle === "sidebar" && "on")} onClick={() => { setNavStyle("sidebar"); }}>
+                      <I n="ph-sidebar-simple" /> Sidebar
+                    </button>
+                    <button className={cx(navStyle === "top-pill" && "on")} onClick={() => { setNavStyle("top-pill"); }}>
+                      <I n="ph-browser" /> Top Pills
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 

@@ -23,7 +23,7 @@ tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.30", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 tauri-plugin-dialog = "2.7.1"
 uuid = { version = "1.23.3", features = ["v4"] }
 chrono = "0.4.45"
@@ -36,6 +36,10 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 rand = "0.8"
 zeroize = "1"
+tokio-rusqlite = "0.6.0"
+tokio = { version = "1", features = ["full"] }
+moka = { version = "0.12", features = ["sync"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

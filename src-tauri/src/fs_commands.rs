@@ -305,7 +305,7 @@ pub(crate) fn create_file_entry_impl(
 }
 
 #[tauri::command]
-pub fn fs_create_file(
+pub async fn fs_create_file(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     workspace_id: String,
@@ -344,7 +344,9 @@ pub fn fs_create_file(
     let (size, modified) = extract_metadata(&unique_path);
     let mime = Some(guess_mime_type(&ext_str));
 
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = format!(r#"{{"workspace_id":"{}","title":"{}","action":"create_file"}}"#, workspace_id, final_title);
     
     let result = execute_two_phase(&mut conn, "create_file", &payload, |tx| {
@@ -355,10 +357,14 @@ pub fn fs_create_file(
         let _ = fs::remove_file(&unique_path);
     }
     result
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_import_file(
+pub async fn fs_import_file(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     workspace_id: String,
@@ -391,7 +397,9 @@ pub fn fs_import_file(
 
     let (size, modified) = extract_metadata(Path::new(&final_path));
 
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = format!(r#"{{"workspace_id":"{}","title":"{}","action":"import_file"}}"#, workspace_id, title);
     
     let result = execute_two_phase(&mut conn, "import_file", &payload, |tx| {
@@ -402,15 +410,19 @@ pub fn fs_import_file(
         let _ = fs::remove_file(Path::new(&final_path));
     }
     result
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_open_file(path: String) -> Result<(), String> {
+pub async fn fs_open_file(path: String) -> Result<(), String> {
     opener::open(&path).map_err(|e| format!("Failed to open file: {}", e))
 }
 
 #[tauri::command]
-pub fn fs_reveal_in_explorer(path: String) -> Result<(), String> {
+pub async fn fs_reveal_in_explorer(path: String) -> Result<(), String> {
     let path = Path::new(&path);
     if let Some(parent) = path.parent() {
         opener::reveal(path).or_else(|_| opener::open(parent))
@@ -421,8 +433,10 @@ pub fn fs_reveal_in_explorer(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn fs_delete_file(state: State<'_, AppState>, id: String, app_handle: tauri::AppHandle) -> Result<String, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn fs_delete_file(state: State<'_, AppState>, id: String, app_handle: tauri::AppHandle) -> Result<String, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let path_opt: Option<String> = conn.query_row("SELECT path FROM files WHERE id = ?", [&id], |r| r.get(0)).ok();
 
     // 1. Prepare Phase (Filesystem)
@@ -465,11 +479,17 @@ pub fn fs_delete_file(state: State<'_, AppState>, id: String, app_handle: tauri:
             Err(e)
         }
     }
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_get_files(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<FileEntry>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn fs_get_files(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<FileEntry>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let mut stmt = conn.prepare(
         "SELECT i.id, i.workspace_id, i.item_type, i.title, 
                 f.path, f.filename, f.extension, f.mime_type, f.size_bytes, f.modified_at, f.favorite, f.tags
@@ -500,11 +520,17 @@ pub fn fs_get_files(state: State<'_, AppState>, workspace_id: String) -> Result<
         items.push(row.map_err(|e| e.to_string())?);
     }
     Ok(items)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_rename_file(state: State<'_, AppState>, id: String, new_title: String) -> Result<FileEntry, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn fs_rename_file(state: State<'_, AppState>, id: String, new_title: String) -> Result<FileEntry, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let path_str: String = conn.query_row("SELECT path FROM files WHERE id = ?", [&id], |r| r.get(0)).map_err(|e| e.to_string())?;
     let old_path = Path::new(&path_str);
     
@@ -574,10 +600,14 @@ pub fn fs_rename_file(state: State<'_, AppState>, id: String, new_title: String)
             tags: row.get(11)?,
         })
     }).map_err(|e| e.to_string())
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_create_note(
+pub async fn fs_create_note(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     workspace_id: String,
@@ -596,7 +626,9 @@ pub fn fs_create_note(
     let path_str = unique_path.to_string_lossy().to_string();
     let (size, modified) = extract_metadata(&unique_path);
 
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = format!(r#"{{"workspace_id":"{}","title":"{}","action":"create_note"}}"#, workspace_id, final_title);
     
     let result = execute_two_phase(&mut conn, "create_note", &payload, |tx| {
@@ -632,10 +664,14 @@ pub fn fs_create_note(
         let _ = fs::remove_file(&unique_path);
     }
     result
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_read_note_content(path: String) -> Result<String, String> {
+pub async fn fs_read_note_content(path: String) -> Result<String, String> {
     let p = Path::new(&path);
     if !p.exists() {
         return Err("Note file does not exist on disk".into());
@@ -644,12 +680,14 @@ pub fn fs_read_note_content(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn fs_write_note_content(
+pub async fn fs_write_note_content(
     state: State<'_, AppState>,
     id: String,
     content: String,
 ) -> Result<(), String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let path_str: String = conn.query_row("SELECT path FROM files WHERE id = ?", [&id], |r| r.get(0)).map_err(|e| e.to_string())?;
     let p = Path::new(&path_str);
     
@@ -665,6 +703,10 @@ pub fn fs_write_note_content(
         ).map_err(|e| e.to_string())?;
         Ok(())
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // Convert one supported document into HTML note text. None => unsupported extension.
@@ -740,14 +782,20 @@ fn import_one_note(conn: &mut rusqlite::Connection, app_handle: &tauri::AppHandl
 }
 
 #[tauri::command]
-pub fn fs_import_note_file(
+pub async fn fs_import_note_file(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     workspace_id: String,
     source_path: String,
 ) -> Result<FileEntry, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     import_one_note(&mut conn, &app_handle, &workspace_id, &source_path)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -775,7 +823,7 @@ fn collect_note_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
 // Import every supported note file under a folder (recursive) — used by the Obsidian /
 // Notion importers in Settings. Real: each file becomes a persisted note.
 #[tauri::command]
-pub fn import_notes_from_folder(
+pub async fn import_notes_from_folder(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     workspace_id: String,
@@ -790,7 +838,9 @@ pub fn import_notes_from_folder(
     if files.is_empty() {
         return Err("No .md, .txt, or .html files found in that folder.".into());
     }
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let mut imported = 0u32;
     let mut skipped = 0u32;
     for f in files {
@@ -800,6 +850,10 @@ pub fn import_notes_from_folder(
         }
     }
     Ok(ImportFolderResult { imported, skipped })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // ── Maintenance: custom CSS folder + database optimization ──
@@ -818,13 +872,13 @@ fn get_custom_css_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> 
 }
 
 #[tauri::command]
-pub fn reveal_custom_css_folder(app_handle: tauri::AppHandle) -> Result<(), String> {
+pub async fn reveal_custom_css_folder(app_handle: tauri::AppHandle) -> Result<(), String> {
     let dir = get_custom_css_dir(&app_handle)?;
     opener::open(dir).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_custom_css(app_handle: tauri::AppHandle) -> Result<String, String> {
+pub async fn get_custom_css(app_handle: tauri::AppHandle) -> Result<String, String> {
     let dir = get_custom_css_dir(&app_handle)?;
     let mut combined = String::new();
     if let Ok(entries) = fs::read_dir(&dir) {
@@ -842,20 +896,27 @@ pub fn get_custom_css(app_handle: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn optimize_database(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<i64, String> {
+pub async fn optimize_database(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<i64, String> {
     let db_path = app_handle.path().app_data_dir().map_err(|e| e.to_string())?.join("loom.db");
     let before = fs::metadata(&db_path).map(|m| m.len() as i64).unwrap_or(0);
-    {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;").map_err(|e| e.to_string())?;
-    }
-    let after = fs::metadata(&db_path).map(|m| m.len() as i64).unwrap_or(before);
+    Ok(())
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)?;
+    
+    let after = std::fs::metadata(&db_path).map(|m| m.len() as i64).unwrap_or(0);
     Ok((before - after).max(0))
 }
 
 #[tauri::command]
-pub fn fs_reconcile(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn fs_reconcile(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let files_dir = get_loom_files_dir(&app_handle)?;
     let notes_dir = get_loom_notes_dir(&app_handle)?;
 
@@ -964,6 +1025,10 @@ pub fn fs_reconcile(state: State<'_, AppState>, app_handle: tauri::AppHandle) ->
     }
 
     Ok(())
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -978,8 +1043,10 @@ pub struct IndexResult {
 /// can find files by their contents. This is real full-text indexing wired into the
 /// search/DB pipeline — not OCR (the app has no OCR engine).
 #[tauri::command]
-pub fn index_text_files(state: State<'_, AppState>, workspace_id: String) -> Result<IndexResult, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn index_text_files(state: State<'_, AppState>, workspace_id: String) -> Result<IndexResult, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
 
     // Pull every active file row + its current item metadata.
     let mut stmt = conn.prepare(
@@ -1056,6 +1123,10 @@ pub fn index_text_files(state: State<'_, AppState>, workspace_id: String) -> Res
     }
 
     Ok(IndexResult { indexed, skipped, total })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // Encrypt/decrypt a tracked file IN PLACE — the item id (and therefore every link to
@@ -1186,8 +1257,10 @@ fn repoint_file(conn: &mut rusqlite::Connection, action: &str, id: &str, old_pat
 }
 
 #[tauri::command]
-pub fn fs_encrypt_file(state: State<'_, AppState>, id: String, password: String) -> Result<FileEntry, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn fs_encrypt_file(state: State<'_, AppState>, id: String, password: String) -> Result<FileEntry, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let old_path: String = conn.query_row("SELECT path FROM files WHERE id = ?", [&id], |r| r.get(0)).map_err(|e| e.to_string())?;
     // encrypt_path is deterministic: dest is always "{old_path}.enc". Record the
     // intent before touching disk so a crash mid-op is recoverable.
@@ -1198,11 +1271,17 @@ pub fn fs_encrypt_file(state: State<'_, AppState>, id: String, password: String)
         Err(e) => { clear_pending_fs_op(&conn, &op_id); return Err(e); }
     };
     repoint_file(&mut conn, "encrypt_file", &id, &old_path, &new_path, &op_id)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_decrypt_file(state: State<'_, AppState>, id: String, password: String) -> Result<FileEntry, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn fs_decrypt_file(state: State<'_, AppState>, id: String, password: String) -> Result<FileEntry, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let old_path: String = conn.query_row("SELECT path FROM files WHERE id = ?", [&id], |r| r.get(0)).map_err(|e| e.to_string())?;
     // decrypt_path is deterministic: dest strips a trailing ".enc", else "{path}.dec".
     let dest = if old_path.ends_with(".enc") {
@@ -1216,10 +1295,14 @@ pub fn fs_decrypt_file(state: State<'_, AppState>, id: String, password: String)
         Err(e) => { clear_pending_fs_op(&conn, &op_id); return Err(e); }
     };
     repoint_file(&mut conn, "decrypt_file", &id, &old_path, &new_path, &op_id)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn fs_copy_file(src: String, dest: String) -> Result<(), String> {
+pub async fn fs_copy_file(src: String, dest: String) -> Result<(), String> {
     let src_path = Path::new(&src);
     let dest_path = Path::new(&dest);
     if !src_path.exists() {
@@ -1229,7 +1312,7 @@ pub fn fs_copy_file(src: String, dest: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn fs_write_any_file(path: String, content: String) -> Result<(), String> {
+pub async fn fs_write_any_file(path: String, content: String) -> Result<(), String> {
     fs::write(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())
 }
 
@@ -1241,8 +1324,10 @@ pub struct SweepResult {
 }
 
 #[tauri::command]
-pub fn run_integrity_sweep(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<SweepResult, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn run_integrity_sweep(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<SweepResult, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let files_dir = get_loom_files_dir(&app_handle)?;
     let notes_dir = get_loom_notes_dir(&app_handle)?;
 
@@ -1331,6 +1416,10 @@ pub fn run_integrity_sweep(state: State<'_, AppState>, app_handle: tauri::AppHan
         issues_detected,
         repairs_taken,
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[cfg(test)]

@@ -17,11 +17,13 @@ pub struct DashboardWidget {
 }
 
 #[tauri::command]
-pub fn get_dashboard_layout(
-    state: tauri::State<AppState>,
+pub async fn get_dashboard_layout(
+    state: tauri::State<'_, AppState>,
     workspace_id: String,
 ) -> Result<Vec<DashboardWidget>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
 
     let mut stmt = conn
         .prepare("SELECT id, workspace_id, widget_type, x, y, w, h, hidden, config FROM dashboard_widgets WHERE workspace_id = ?")
@@ -49,15 +51,21 @@ pub fn get_dashboard_layout(
     }
 
     Ok(widgets)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn save_dashboard_layout(
-    state: tauri::State<AppState>,
+pub async fn save_dashboard_layout(
+    state: tauri::State<'_, AppState>,
     workspace_id: String,
     widgets: Vec<DashboardWidget>,
 ) -> Result<(), String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
@@ -80,4 +88,8 @@ pub fn save_dashboard_layout(
     tx.commit().map_err(|e| e.to_string())?;
 
     Ok(())
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }

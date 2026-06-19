@@ -9,6 +9,7 @@
 // named themes are stored as a list; one is active at a time.
 
 import { getSetting, setSetting } from "../ipc/items";
+import { setCustomThemeCache, applyCombinedThemeAndBackground } from "./settings";
 
 export type FieldType = "color" | "scale" | "select" | "text";
 
@@ -138,19 +139,17 @@ function fxTarget(): HTMLElement | null {
 // token reverts to the base theme immediately.
 export function applyCustomTheme(theme: CustomTheme | null, enabled: boolean) {
   if (typeof document === "undefined") return;
+
+  setCustomThemeCache(theme, enabled);
+  applyCombinedThemeAndBackground();
+
   const s = document.documentElement.style;
   const fx = fxTarget();
-  for (const k of MANAGED_VAR_KEYS) s.removeProperty(k);
   s.removeProperty("filter");                 // clear any legacy filter left on <html>
   if (fx) fx.style.removeProperty("filter");
   if (!enabled || !theme) return;
 
   const t = theme.tokens || {};
-  for (const k of MANAGED_VAR_KEYS) {
-    const v = t[k];
-    if (v != null && v !== "") s.setProperty(k, v);
-  }
-
   const filter = composeFilter(t);
   if (filter && fx) fx.style.setProperty("filter", filter);
 }

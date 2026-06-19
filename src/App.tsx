@@ -13,7 +13,10 @@ import {
   getAccentPref, setAccentPref as persistAccentPref, applyAccent,
   getStartupView, SHORTCUTS, ThemePref, Resolved,
   getFontPref, applyFont, getDensityPref, applyDensity, getAmbientPref, applyAmbient,
+  getAcrylicPref, applyAcrylic, getNavStylePref, setNavStylePref, applyNavStyle, NavStyle,
+  getBackgroundConfig, applyBackgroundConfig,
 } from "./lib/settings";
+import { trackItemOpened } from "./lib/viewMemory";
 import { getCustomThemeState, applyCustomTheme, activeTheme } from "./lib/theme";
 import { ConnectionsPanel, Toasts, ShortcutsOverlay } from "./components/shared";
 import { fsImportNoteFile, fsImportFile } from "./ipc/fs";
@@ -24,6 +27,7 @@ import { TasksModule, ProjectsModule, HabitsModule, CalendarModule, BookmarksMod
 import { SettingsModule } from "./components/Settings";
 import { CommandPalette } from "./components/CommandPalette";
 import { SplitBrainVerifier } from "./lib/splitBrainVerifier";
+import { TopNav } from "./components/TopNav";
 
 type View = "dashboard" | "notes" | "timeline" | "library" | "tasks" | "projects" | "habits" | "calendar" | "vault" | "bookmarks" | "files" | "automation" | "settings";
 
@@ -90,6 +94,8 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [dragTargetId, setDragTargetId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [navStyle, setNavStyleState] = useState<NavStyle>("sidebar");
+  const [searchExpanded, setSearchExpanded] = useState(false);
 
   // Global drag-and-drop window listener
   useEffect(() => {
@@ -127,14 +133,19 @@ export function App() {
     Promise.all([
       getStartupView(), getThemePref(), getAccentPref(),
       getFontPref(), getDensityPref(), getAmbientPref(),
-    ]).then(([startup, theme, acc, font, density, ambient]) => {
+      getAcrylicPref(), getNavStylePref(), getBackgroundConfig()
+    ]).then(([startup, theme, acc, font, density, ambient, acrylic, navSt, bgConf]) => {
       // A pop-out window carries ?view= — honour it over the configured startup view.
       if (!initialParams?.get("view")) setView(startup as View);
       setThemePrefState(theme as string);
       setAccentState(acc as string);
       applyFont(font as string);
-      applyDensity(density as boolean);
+      applyDensity(density as any);
       applyAmbient(ambient as boolean);
+      applyAcrylic(acrylic as boolean);
+      applyNavStyle(navSt as NavStyle);
+      setNavStyleState(navSt as NavStyle);
+      applyBackgroundConfig(bgConf as any);
       setReady(true);
     });
     // Apply the saved custom theme (design-token overrides) on launch, if enabled.
@@ -146,6 +157,19 @@ export function App() {
       if (!el) { el = document.createElement("style"); el.id = "loom-custom-css"; document.head.appendChild(el); }
       el.textContent = css;
     }).catch(() => {});
+    
+    // Global Parallax listener
+    const onMove = (e: MouseEvent) => {
+      if (document.documentElement.dataset.parallax !== "on") return;
+      // Calculate slight offset relative to center (e.g. max 15px shift)
+      const x = (e.clientX / window.innerWidth - 0.5) * 30;
+      const y = (e.clientY / window.innerHeight - 0.5) * 30;
+      document.documentElement.style.setProperty("--bg-px", `${x}px`);
+      document.documentElement.style.setProperty("--bg-py", `${y}px`);
+    };
+    window.addEventListener("mousemove", onMove, { passive: true });
+    
+    return () => window.removeEventListener("mousemove", onMove);
   }, []);
 
   // Resolve + apply theme; persist the preference; track the OS scheme when "system".
@@ -299,6 +323,7 @@ export function App() {
     if (target) setView(target);
     setFocusId(id);
     setInspectId(id);
+    trackItemOpened(id);
   }, [resolve, refresh]);
 
   const openPalette = useCallback(() => setPalette(true), []);
@@ -314,13 +339,25 @@ export function App() {
   const setAccent = useCallback((a: string) => setAccentState(a), []);
 
   const showShortcuts = useCallback(() => setShortcutsOpen(true), []);
-  const ctx = { navigate, inspect, toast, openPalette, editDash, showShortcuts, toggleTheme, themePref, setTheme, accent, setAccent, dragTargetId, setDragTargetId };
+  const setNavStyle = useCallback(async (style: NavStyle) => {
+    await setNavStylePref(style);
+    setNavStyleState(style);
+    applyNavStyle(style);
+  }, []);
+  const ctx = { navigate, inspect, toast, openPalette, editDash, showShortcuts, toggleTheme, themePref, setTheme, accent, setAccent, dragTargetId, setDragTargetId, navStyle, setNavStyle };
 
   // The single action registry — built once from the app's real mutators/navigation
   // and provided so the palette, keyboard, and automation all dispatch through it.
   const actionsApi = useMemo(
-    () => makeActionsApi({ create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme }),
-    [create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme],
+    () => makeActionsApi({ 
+      create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme,
+      setNavStyle,
+      setDensity: (mode) => {
+        applyDensity(mode);
+        import("./lib/settings").then(s => s.setDensityPref(mode));
+      }
+    }),
+    [create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme, setNavStyle],
   );
 
   if (!ready) return null;
@@ -331,6 +368,9 @@ export function App() {
     <LoomCtx.Provider value={ctx}>
       <ActionsCtx.Provider value={actionsApi}>
       <div className="app" data-theme={resolved}>
+        {/* Background Engine Layer */}
+        <div id="loom-bg-engine" />
+        
         {dragOver && (
           <div className="global-drag-overlay">
             <div className="drag-content">
@@ -353,14 +393,46 @@ export function App() {
           </div>
 
           <div className="tb-drag" data-tauri-drag-region>
-            <button className="tb-search" onClick={() => setPalette(true)} id="open-palette-btn">
-              <I n="ph-magnifying-glass" />
-              <span>Search everything…</span>
-              <span className="kbd">⌘K</span>
-            </button>
+            {navStyle === "top-pill" ? (
+              <TopNav navGroups={navGroups} view={view} navigate={navigate} toast={toast} />
+            ) : (
+              <button className="tb-search" onClick={() => setPalette(true)} id="open-palette-btn">
+                <I n="ph-magnifying-glass" />
+                <span>Search everything…</span>
+                <span className="kbd">⌘K</span>
+              </button>
+            )}
           </div>
 
           <div className="tb-actions">
+            {navStyle === "top-pill" && (
+              <div className={cx("tb-search-exp", searchExpanded && "expanded")}>
+                <button 
+                  className={cx("tb-iconbtn", searchExpanded && "active")} 
+                  onClick={() => {
+                    if (searchExpanded) setPalette(true);
+                    else setSearchExpanded(true);
+                  }}
+                  onBlur={(e) => {
+                    // close if focus leaves the expanding container
+                    if (!e.currentTarget.parentElement?.contains(e.relatedTarget)) {
+                      setSearchExpanded(false);
+                    }
+                  }}
+                  title="Search everything... (⌘K)"
+                  aria-label="Search"
+                >
+                  <I n="ph-magnifying-glass" />
+                </button>
+                {searchExpanded && (
+                  <button className="tb-search-inner" onClick={() => setPalette(true)}>
+                    <span>Search everything…</span>
+                    <span className="kbd">⌘K</span>
+                  </button>
+                )}
+              </div>
+            )}
+            
             <button className="tb-iconbtn" onClick={() => undo()} disabled={!canUndo} title={canUndo ? `Undo ${undoLabel}` : "Nothing to undo"} aria-label={canUndo ? `Undo ${undoLabel}` : "Nothing to undo"} id="undo-btn">
               <I n="ph-arrow-counter-clockwise" />
             </button>
@@ -382,7 +454,8 @@ export function App() {
 
         {/* ---- Body ---- */}
         <div className="body-row">
-          {/* Sidebar */}
+          {/* Sidebar — rendered when navStyle === "sidebar" */}
+          {navStyle === "sidebar" && (
           <nav
             className={cx("sidebar", sidebarCollapsed && "collapsed")}
             aria-label="Main navigation"
@@ -444,6 +517,8 @@ export function App() {
             </div>
 
           </nav>
+          )}
+
 
           {/* Main */}
           <main className="main" id="main-content" tabIndex={-1}>

@@ -3,6 +3,7 @@ import { NAV, TYPE_ICON, TYPE_COLOR, TYPE_LABEL } from "../lib/typeMeta";
 import { I, cx, useLoom, clickable } from "../lib/context";
 import { searchItems } from "../ipc/search";
 import { useItemStore } from "../lib/itemStore";
+import { getRecentOpened } from "../lib/viewMemory";
 import { useActions } from "../lib/actions";
 import { OverlayShell } from "./ui/OverlayShell";
 
@@ -24,7 +25,7 @@ function highlight(text: string, q: string) {
 interface CommandPaletteProps { onClose: () => void; }
 export function CommandPalette({ onClose }: CommandPaletteProps) {
   const ctx = useLoom();
-  const { workspaceId } = useItemStore();
+  const { workspaceId, items: allItems } = useItemStore();
   const { dispatch, actions } = useActions();
   // Palette-shaped command items from the single action registry — one source.
   const commandItems = useMemo(
@@ -87,10 +88,52 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
 
   const results = useMemo(() => {
     const query = q.trim().toLowerCase();
+
+    const formatEntity = (e: any) => {
+      let meta: any = {};
+      try { meta = JSON.parse(e.metadata || "{}"); } catch (err) { /* ignore */ }
+      let icon = TYPE_ICON[e.item_type] || "ph-file";
+      let color = TYPE_COLOR[e.item_type] || "var(--text)";
+      let sub = "";
+      if (e.item_type === "task") { icon = "ph-check-square"; color = "var(--h-tasks)"; sub = meta.project || "Task"; }
+      if (e.item_type === "note") { icon = "ph-note-pencil"; color = "var(--h-notes)"; sub = meta.folder || "Note"; }
+      if (e.item_type === "library") { icon = meta.icon || "ph-book"; color = meta.color || "var(--h-library)"; sub = meta.kind || "Library"; }
+      if (e.item_type === "calendar") { icon = "ph-calendar-dots"; color = meta.color || "var(--h-calendar)"; sub = meta.sub || "Event"; }
+      return { id: e.id, label: e.title, kind: "entity", entity: { ...e, ...meta }, icon, color, sub, type: e.item_type, _meta: meta };
+    };
+
     if (!query) {
+      const openedIds = getRecentOpened();
+      const recentOpened = openedIds.map(id => allItems.find(i => i.id === id)).filter(Boolean).slice(0, 4).map(formatEntity);
+      const recentCreated = [...allItems].sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0)).slice(0, 4).map(formatEntity);
+      
+      const getUpdatedTs = (item: any, meta: any) => {
+        if (meta.updated) {
+          const t = new Date(meta.updated).getTime();
+          if (!isNaN(t)) return t;
+        }
+        if (meta.tracking?.lastActivityAt) {
+          const t = new Date(meta.tracking.lastActivityAt).getTime();
+          if (!isNaN(t)) return t;
+        }
+        if (meta.dueDate) {
+          const t = new Date(meta.dueDate).getTime();
+          if (!isNaN(t)) return t;
+        }
+        return Number(item.created_at || 0) * 1000;
+      };
+      
+      const recentEdited = [...allItems].map((i: any) => {
+        let meta: any = {};
+        try { meta = JSON.parse(i.metadata || "{}"); } catch(e) {}
+        return { item: i, ts: getUpdatedTs(i, meta) };
+      }).sort((a: any, b: any) => b.ts - a.ts).slice(0, 4).map((e: any) => formatEntity(e.item));
+
       return {
         groups: [
-          { title: "Jump to", items: corpus.filter((c) => c.kind === "navigate").slice(0, 5) },
+          ...(recentOpened.length ? [{ title: "Recent: Opened", items: recentOpened }] : []),
+          ...(recentEdited.length ? [{ title: "Recent: Edited", items: recentEdited }] : []),
+          ...(recentCreated.length ? [{ title: "Recent: Created", items: recentCreated }] : []),
           { title: "Commands", items: commandItems },
         ],
       };

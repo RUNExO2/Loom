@@ -19,6 +19,8 @@ import { encryptFile, decryptFile, indexTextFiles } from "../ipc/content";
 import { fsWriteAnyFile } from "../ipc/fs";
 import { save } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useViewMemory } from "../lib/viewMemory";
+
 
 // Local datetime formatted as the value an <input type="datetime-local"> expects.
 function toLocalInput(d: Date): string {
@@ -49,8 +51,8 @@ export function TasksModule() {
   const { items: tasks, create, updateMeta, updateFields, remove, restore, ready } = useTasks();
   const { links, items: allItems } = useItemStore();
   const loading = !ready;
-  const [group, setGroup] = useState("due");
-  const [prio, setPrio] = useState("all");
+  const [group, setGroup] = useViewMemory("tasks.group", "due");
+  const [prio, setPrio] = useViewMemory("tasks.prio", "all");
   
   // Enhancement 17: Pomodoro Timer State
   const [pomoTask, setPomoTask] = useState<string | null>(null);
@@ -108,7 +110,7 @@ export function TasksModule() {
   const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 
   const handleNewTask = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "New task", icon: "ph-check-square", accent: "var(--h-tasks)", submitLabel: "Create task",
       fields: [
         { name: "title", label: "Title", placeholder: "What needs doing?", required: true },
@@ -148,7 +150,7 @@ export function TasksModule() {
   const [openSubtasks, setOpenSubtasks] = useState<string | null>(null);
 
   const addSubtask = async (item: Item) => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Add subtask", icon: "ph-list-checks", accent: "var(--h-tasks)", submitLabel: "Add",
       fields: [{ name: "text", label: "Subtask", placeholder: "A small step…", required: true }],
     });
@@ -173,7 +175,7 @@ export function TasksModule() {
   const handleEdit = async (e: React.MouseEvent, item: Item) => {
     e.stopPropagation();
     const meta = getTaskMeta(item);
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Edit task", icon: "ph-pencil", accent: "var(--h-tasks)", submitLabel: "Save changes",
       fields: [
         { name: "title", label: "Title", defaultValue: item.title, required: true },
@@ -345,10 +347,10 @@ export function ProjectsModule() {
   const { rows: list, activeCount } = useMemo(
     () => createProjectsViewModel({ projects: items, links, allItems }), [items, links, allItems],
   );
-  const [viewMode, setViewMode] = useState("list");
+  const [viewMode, setViewMode] = useViewMemory("projects.viewMode", "list");
 
   const addMilestone = async (item: Item) => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Add milestone", icon: "ph-flag-banner", accent: "var(--h-projects)", submitLabel: "Add",
       fields: [{ name: "text", label: "Milestone", placeholder: "e.g. Ship v1 beta", required: true }],
     });
@@ -370,7 +372,7 @@ export function ProjectsModule() {
   const HEALTH_COLOR: Record<string, string> = { "On track": "var(--sys-success)", "At risk": "var(--sys-danger)", "Done": "var(--sys-info)" };
 
   const handleNew = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "New project", icon: "ph-kanban", accent: "var(--h-projects)", submitLabel: "Create project",
       fields: [
         { name: "title", label: "Name", placeholder: "Project name…", required: true },
@@ -420,7 +422,7 @@ export function ProjectsModule() {
   const handleEdit = async (e: React.MouseEvent, item: Item) => {
     e.stopPropagation();
     const meta = getProjectMeta(item);
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Edit project", icon: "ph-pencil", accent: "var(--h-projects)", submitLabel: "Save changes",
       fields: [
         { name: "title", label: "Name", defaultValue: item.title, required: true },
@@ -581,7 +583,7 @@ export function HabitsModule() {
   ];
 
   const handleNew = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "New habit", icon: "ph-pulse", accent: "var(--h-habits)", submitLabel: "Create habit",
       fields: [
         { name: "title", label: "Name", placeholder: "Habit name…", required: true },
@@ -602,7 +604,7 @@ export function HabitsModule() {
   const handleEdit = async (e: React.MouseEvent, item: Item) => {
     e.stopPropagation();
     const meta = getHabitMeta(item);
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Edit habit", icon: "ph-pencil", accent: "var(--h-habits)", submitLabel: "Save changes",
       fields: [
         { name: "title", label: "Name", defaultValue: item.title, required: true },
@@ -808,7 +810,7 @@ export function CalendarModule() {
 
   const handleNewEvent = async () => {
     const def = new Date(); def.setHours(10, 0, 0, 0);
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "New event", icon: "ph-calendar-plus", accent: "var(--h-calendar)", submitLabel: "Create event",
       fields: [
         { name: "title", label: "Title", placeholder: "Event title…", required: true },
@@ -1096,7 +1098,7 @@ export function BookmarksModule() {
 
   // Web Clipper: prompt for a URL, fetch + extract it, then persist as note + bookmark.
   const handleWebClipper = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Web Clipper", icon: "ph-scissors", accent: "var(--h-bookmarks)", submitLabel: "Fetch & clip",
       fields: [{ name: "url", label: "Page URL", type: "url", defaultValue: "https://", placeholder: "https://…", required: true }],
     });
@@ -1138,7 +1140,7 @@ export function BookmarksModule() {
         // Metadata fetch is best-effort enrichment; fall back to the raw URL.
       }
 
-      const r = await modal.form({
+      const r = await modal.form({ panel: true,
         title: "Add bookmark", icon: "ph-bookmark-simple", accent: "var(--h-bookmarks)", submitLabel: "Add bookmark",
         fields: [
           { name: "title", label: "Title", defaultValue: title, required: true },
@@ -1181,7 +1183,7 @@ export function BookmarksModule() {
             }
 
             if (url) {
-              const r = await modal.form({
+              const r = await modal.form({ panel: true,
                 title: "Add bookmark", icon: "ph-bookmark-simple", accent: "var(--h-bookmarks)", submitLabel: "Add bookmark",
                 fields: [
                   { name: "title", label: "Title", defaultValue: title, required: true },
@@ -1211,7 +1213,7 @@ export function BookmarksModule() {
   }, [create, modal, toast]);
 
   const handleAdd = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Add bookmark", icon: "ph-bookmark-simple", accent: "var(--h-bookmarks)", submitLabel: "Add bookmark",
       fields: [
         { name: "title", label: "Title", placeholder: "Bookmark name…", required: true },
@@ -1230,7 +1232,7 @@ export function BookmarksModule() {
   const handleEdit = async (e: React.MouseEvent, item: Item) => {
     e.stopPropagation();
     const meta = getBookmarkMeta(item);
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Edit bookmark", icon: "ph-pencil", accent: "var(--h-bookmarks)", submitLabel: "Save changes",
       fields: [
         { name: "title", label: "Title", defaultValue: item.title, required: true },
@@ -1378,7 +1380,7 @@ export function FilesModule() {
   }, [importFile, modal, toast]);
 
   const handleNew = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "New file entry", icon: "ph-file-plus", accent: "var(--h-files)", submitLabel: "Create file",
       fields: [
         { name: "title", label: "File name", placeholder: "e.g. notes.txt", required: true },
@@ -1400,7 +1402,7 @@ export function FilesModule() {
 
   const handleRename = async (e: React.MouseEvent, item: Item) => {
     e.stopPropagation();
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Rename file", icon: "ph-pencil", accent: "var(--h-files)", submitLabel: "Rename",
       fields: [{ name: "title", label: "New Name (without extension)", defaultValue: item.title, required: true }],
     });
@@ -1454,7 +1456,7 @@ export function FilesModule() {
     const isEnc = meta.path.toLowerCase().endsWith(".enc");
 
     if (isEnc) {
-      const r = await modal.form({
+      const r = await modal.form({ panel: true,
         title: "Decrypt file", icon: "ph-lock-open", accent: "var(--h-files)", submitLabel: "Decrypt",
         fields: [{ name: "password", label: "Password", type: "password", required: true }],
       });
@@ -1469,7 +1471,7 @@ export function FilesModule() {
       return;
     }
 
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Encrypt file", icon: "ph-lock", accent: "var(--h-files)", submitLabel: "Encrypt",
       fields: [
         { name: "password", label: "Password", type: "password", required: true, placeholder: "Choose a strong password" },

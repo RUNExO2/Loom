@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useState } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
+import { unfreezeSystem } from "../ipc/settings";
 import { getWorkspaces, createWorkspace } from "../ipc/workspaces";
 import {
   getItems, createItem as ipcCreate, updateItem as ipcUpdate, updateItemMetadata as ipcUpdateMeta,
@@ -82,7 +83,7 @@ export const useItemStore = () => {
 // NOT as arrays inside metadata. The seed's static ids (e.g. "p-gng") are mapped to
 // the real UUIDs create_item assigns, then every seed-declared edge is materialised
 // as a link row. After this, relations.ts derives all connections from those rows.
-async function seedAll(wsId: string): Promise<Item[]> {
+async function _seedAll(wsId: string): Promise<Item[]> {
   const out: Item[] = [];
   const idMap = new Map<string, string>();          // seed static id → real UUID
   const pending: { from: string; to: string[] }[] = []; // edges to materialise after all rows exist
@@ -169,6 +170,8 @@ async function seedAll(wsId: string): Promise<Item[]> {
 
   return out;
 }
+// noUnusedLocals: _seedAll is intentionally preserved for future use.
+void (null as unknown as typeof _seedAll);
 
 // Vault + automation were added after the original seed. For DBs seeded before they
 // existed, this writes the missing system rows once. Their seed relationships can't be
@@ -203,7 +206,8 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
       setWorkspaceId(wsId);
       let loaded = await getItems(wsId);
       if (loaded.length === 0) {
-        loaded = await seedAll(wsId);
+        // Database is empty. Seeding is disabled so the app starts as a clean, blank slate.
+        loaded = [];
       } else if (!loaded.some((i) => i.item_type === "vault" || i.item_type === "automation")) {
         // DB seeded before system types existed — backfill them once, then reload.
         const push = async (title: string, type: string, meta: any) => {
@@ -223,6 +227,8 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
       setIsVaultUnlocked(vaultSession.isUnlocked());
       
       setReady(true);
+      // Step 8: System is completely hydrated, safe to unfreeze backend and let background tasks run
+      await unfreezeSystem().catch(console.error);
     } catch (e: any) {
       console.error("ItemStore load failed:", e);
       setError(e.message || String(e));
@@ -231,8 +237,11 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
 
   // Listen to mutation events for event-sourced state synchronization
   useEffect(() => {
+    let active = true;
     let unlisten: (() => void) | undefined;
+    
     listen<any>("loom://event", (event) => {
+      if (!active) return;
       const { type, payload } = event.payload;
       switch (type) {
         case 'ITEM_CREATED': {
@@ -299,10 +308,15 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
         }
       }
     }).then((u) => {
-      unlisten = u;
+      if (!active) {
+        u();
+      } else {
+        unlisten = u;
+      }
     });
 
     return () => {
+      active = false;
       if (unlisten) unlisten();
     };
   }, []);
@@ -330,16 +344,25 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
     };
     document.addEventListener("visibilitychange", onVisible);
 
+    let active = true;
     let unlistenChanged: (() => void) | undefined;
     let debounce: ReturnType<typeof setTimeout> | undefined;
     listen("loom://automation-changed", () => {
+      if (!active) return;
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
         refresh().catch((e) => console.error("Automation refresh failed:", e));
       }, 150);
-    }).then((u) => { unlistenChanged = u; }).catch(() => { /* not in a Tauri window */ });
+    }).then((u) => {
+      if (!active) {
+        u();
+      } else {
+        unlistenChanged = u;
+      }
+    }).catch(() => { /* not in a Tauri window */ });
 
     return () => {
+      active = false;
       document.removeEventListener("visibilitychange", onVisible);
       if (unlistenChanged) unlistenChanged();
       if (debounce) clearTimeout(debounce);

@@ -235,8 +235,10 @@ pub struct Link {
 }
 
 #[tauri::command]
-pub fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Workspace, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Workspace, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     
     let id = conn.query_row(
         "INSERT INTO workspaces (id, name) VALUES (lower(hex(randomblob(16))), ?) RETURNING id",
@@ -251,11 +253,17 @@ pub fn create_workspace(state: State<'_, AppState>, name: String) -> Result<Work
     ).map_err(|e| e.to_string())?;
 
     Ok(Workspace { id, name, created_at })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn get_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let mut stmt = conn.prepare("SELECT id, name, created_at FROM workspaces").map_err(|e| e.to_string())?;
     
     let rows = stmt.query_map([], |row| {
@@ -271,6 +279,10 @@ pub fn get_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, Stri
         workspaces.push(row.map_err(|e| e.to_string())?);
     }
     Ok(workspaces)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 pub(crate) fn create_item_impl(conn: &rusqlite::Connection, workspace_id: String, title: String, item_type: String, metadata: String) -> Result<Item, String> {
@@ -299,24 +311,36 @@ pub(crate) fn create_item_impl(conn: &rusqlite::Connection, workspace_id: String
 }
 
 #[tauri::command]
-pub fn create_item(state: State<'_, AppState>, workspace_id: String, title: String, item_type: String, metadata: String) -> Result<Item, String> {
+pub async fn create_item(state: State<'_, AppState>, workspace_id: String, title: String, item_type: String, metadata: String) -> Result<Item, String> {
     let item = {
-        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
         let payload = format!(r#"{{"workspace_id":"{}","title":"{}","item_type":"{}"}}"#, workspace_id, title, item_type);
-        execute_two_phase(&mut conn, "create_item", &payload, |tx| {
+        Ok(execute_two_phase(&mut conn, "create_item", &payload, |tx| {
             create_item_impl(tx, workspace_id, title, item_type, metadata)
-        })?
-    }; // db guard dropped before emitting so the engine's connection never deadlocks
+        })?)
+    
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}?;
     automation::emit(&state, automation::events_for_created(&item));
     Ok(item)
 }
 
 #[tauri::command]
-pub fn get_items(state: State<'_, AppState>, workspace_id: String, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Item>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_items(state: State<'_, AppState>, workspace_id: String, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Item>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let l = limit.unwrap_or(1000000);
     let o = offset.unwrap_or(0);
     get_active_items(&conn, &workspace_id, l, o)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // Turn free-text into a safe FTS5 prefix MATCH expression: every whitespace token
@@ -336,8 +360,10 @@ fn build_fts_match(query: &str) -> String {
 }
 
 #[tauri::command]
-pub fn search_items(state: State<'_, AppState>, workspace_id: String, query: String) -> Result<Vec<Item>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn search_items(state: State<'_, AppState>, workspace_id: String, query: String) -> Result<Vec<Item>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     // Phase 7: FTS5 prefix search over title + item_type. Replaces the old triple
     // `LIKE %q%` full-table scan (which also scanned every metadata JSON blob and
     // could not use any index). `MATCH` hits the FTS index; results come back ranked.
@@ -372,6 +398,10 @@ pub fn search_items(state: State<'_, AppState>, workspace_id: String, query: Str
         items.push(row.map_err(|e| e.to_string())?);
     }
     Ok(items)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 
@@ -391,16 +421,24 @@ pub(crate) fn create_link_impl(conn: &rusqlite::Connection, source_id: String, t
 }
 
 #[tauri::command]
-pub fn create_link(state: State<'_, AppState>, source_id: String, target_id: String, relationship_type: String) -> Result<Link, String> {
-    let (link, ws) = {
-        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
-        let payload = format!(r#"{{"source_id":"{}","target_id":"{}","relationship_type":"{}"}}"#, source_id, target_id, relationship_type);
-        let ws: Option<String> = conn.query_row("SELECT workspace_id FROM items WHERE id = ?", [&source_id], |r| r.get(0)).ok();
-        let link = execute_two_phase(&mut conn, "create_link", &payload, |tx| {
-            create_link_impl(tx, source_id.clone(), target_id.clone(), relationship_type.clone())
-        })?;
-        (link, ws)
-    };
+pub async fn create_link(state: State<'_, AppState>, source_id: String, target_id: String, relationship_type: String) -> Result<Link, String> {
+    let source_id_clone = source_id.clone();
+    let target_id_clone = target_id.clone();
+    let relationship_type_clone = relationship_type.clone();
+    let Ok((link, ws)) = ({
+        state.db.call(move |mut conn| {
+            let res = (|| -> Result<_, String> {
+                let payload = format!(r#"{{"source_id":"{}","target_id":"{}","relationship_type":"{}"}}"#, source_id_clone, target_id_clone, relationship_type_clone);
+                let ws: Option<String> = conn.query_row("SELECT workspace_id FROM items WHERE id = ?", [&source_id_clone], |r| r.get(0)).ok();
+                let link = execute_two_phase(&mut conn, "create_link", &payload, |tx| {
+                    create_link_impl(tx, source_id_clone.clone(), target_id_clone.clone(), relationship_type_clone.clone())
+                })?;
+                Ok((link, ws))
+            })();
+            Ok(res)
+        }).await.map_err(|e| e.to_string()).and_then(|x| x)
+    }) else { return Err("Failed to create link".to_string()) };
+
     if let Some(ws) = ws {
         automation::emit(&state, automation::events_for_link(&link.source_id, &link.target_id, &ws, true));
     }
@@ -408,45 +446,67 @@ pub fn create_link(state: State<'_, AppState>, source_id: String, target_id: Str
 }
 
 #[tauri::command]
-pub fn delete_link(state: State<'_, AppState>, source_id: String, target_id: String, relationship_type: String) -> Result<DeletedId, String> {
-    let (res, ws) = {
-        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
-        let payload = format!(r#"{{"source_id":"{}","target_id":"{}","relationship_type":"{}"}}"#, source_id, target_id, relationship_type);
-        let ws: Option<String> = conn.query_row("SELECT workspace_id FROM items WHERE id = ?", [&source_id], |r| r.get(0)).ok();
-        let res = execute_two_phase(&mut conn, "delete_link", &payload, |tx| {
-            tx.execute(
-                "DELETE FROM links WHERE relationship_type = ?3 AND \
-                 ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))",
-                [source_id.clone(), target_id.clone(), relationship_type.clone()],
-            ).map_err(|e| e.to_string())?;
+pub async fn delete_link(state: State<'_, AppState>, source_id: String, target_id: String, relationship_type: String) -> Result<DeletedId, String> {
+    let source_id_clone = source_id.clone();
+    let target_id_clone = target_id.clone();
+    let relationship_type_clone = relationship_type.clone();
+    let Ok((res_link, ws)) = ({
+        state.db.call(move |mut conn| {
+            let res = (|| -> Result<_, String> {
+                let payload = format!(r#"{{"source_id":"{}","target_id":"{}","relationship_type":"{}"}}"#, source_id_clone, target_id_clone, relationship_type_clone);
+                let ws: Option<String> = conn.query_row("SELECT workspace_id FROM items WHERE id = ?", [&source_id_clone], |r| r.get(0)).ok();
+                let res = execute_two_phase(&mut conn, "delete_link", &payload, |tx| {
+                    tx.execute(
+                        "DELETE FROM links WHERE relationship_type = ?3 AND \
+                         ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))",
+                        [source_id_clone.clone(), target_id_clone.clone(), relationship_type_clone.clone()],
+                    ).map_err(|e| e.to_string())?;
 
-            Ok(DeletedId { id: source_id.clone() })
-        })?;
-        (res, ws)
-    };
+                    Ok(DeletedId { id: source_id_clone.clone() })
+                })?;
+                Ok((res, ws))
+            })();
+            Ok(res)
+        }).await.map_err(|e| e.to_string()).and_then(|x| x)
+    }) else { return Err("Failed to delete link".to_string()) };
+
     if let Some(ws) = ws {
         automation::emit(&state, automation::events_for_link(&source_id, &target_id, &ws, false));
     }
-    Ok(res)
+    Ok(res_link)
 }
 
 #[tauri::command]
-pub fn get_links(state: State<'_, AppState>, item_id: String) -> Result<Vec<Link>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_links(state: State<'_, AppState>, item_id: String) -> Result<Vec<Link>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     get_links_safe(&conn, &item_id)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn get_all_links(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<Link>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_all_links(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<Link>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     get_all_links_safe(&conn, &workspace_id)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // ── Workspace mutations ───────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn update_workspace(state: State<'_, AppState>, id: String, name: String) -> Result<Workspace, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn update_workspace(state: State<'_, AppState>, id: String, name: String) -> Result<Workspace, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = format!(r#"{{"id":"{}","name":"{}"}}"#, id, name);
     
     execute_two_phase(&mut conn, "update_workspace", &payload, |tx| {
@@ -467,11 +527,17 @@ pub fn update_workspace(state: State<'_, AppState>, id: String, name: String) ->
 
         Ok(Workspace { id, name, created_at })
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn delete_workspace(state: State<'_, AppState>, id: String, app_handle: tauri::AppHandle) -> Result<DeletedId, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn delete_workspace(state: State<'_, AppState>, id: String, app_handle: tauri::AppHandle) -> Result<DeletedId, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
 
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path FROM files f JOIN items i ON f.id = i.id WHERE i.workspace_id = ?"
@@ -532,13 +598,19 @@ pub fn delete_workspace(state: State<'_, AppState>, id: String, app_handle: taur
             Err(e)
         }
     }
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // ── Item mutations ────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn update_item(state: State<'_, AppState>, id: String, title: String, item_type: String) -> Result<Item, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn update_item(state: State<'_, AppState>, id: String, title: String, item_type: String) -> Result<Item, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = format!(r#"{{"id":"{}","title":"{}","item_type":"{}"}}"#, id, title, item_type);
     
     execute_two_phase(&mut conn, "update_item", &payload, |tx| {
@@ -567,11 +639,17 @@ pub fn update_item(state: State<'_, AppState>, id: String, title: String, item_t
 
         Ok(item)
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn update_item_intent(state: State<'_, AppState>, id: String, user_pinned: bool, user_size_preference: Option<String>) -> Result<Item, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn update_item_intent(state: State<'_, AppState>, id: String, user_pinned: bool, user_size_preference: Option<String>) -> Result<Item, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = format!(r#"{{"id":"{}","user_pinned":{},"user_size_preference":{:?}}}"#, id, user_pinned, user_size_preference);
     
     execute_two_phase(&mut conn, "update_item_intent", &payload, |tx| {
@@ -600,12 +678,18 @@ pub fn update_item_intent(state: State<'_, AppState>, id: String, user_pinned: b
 
         Ok(item)
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn update_item_metadata(state: State<'_, AppState>, id: String, metadata: String) -> Result<Item, String> {
+pub async fn update_item_metadata(state: State<'_, AppState>, id: String, metadata: String) -> Result<Item, String> {
     let item = {
-        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
         let payload = format!(r#"{{"id":"{}","metadata":"{}"}}"#, id, metadata.replace('"', "\\\""));
 
         execute_two_phase(&mut conn, "update_item_metadata", &payload, |tx| {
@@ -633,8 +717,12 @@ pub fn update_item_metadata(state: State<'_, AppState>, id: String, metadata: St
             }).map_err(|e| e.to_string())?;
 
             Ok(item)
-        })?
-    };
+        })
+    
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}?;
     // Don't let automation events fire for the engine's own metadata writes — those
     // go through create_item_impl/raw UPDATEs, never this command. Automations of
     // item_type 'automation' (toggling on/off) also shouldn't self-trigger.
@@ -654,76 +742,80 @@ pub(crate) fn delete_item_impl(conn: &rusqlite::Connection, id: String) -> Resul
 }
 
 #[tauri::command]
-pub fn delete_item(state: State<'_, AppState>, id: String, app_handle: tauri::AppHandle) -> Result<DeletedId, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn delete_item(state: State<'_, AppState>, id: String, app_handle: tauri::AppHandle) -> Result<DeletedId, String> {
+    let id_clone = id.clone();
+    let db_res = state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+            let file_info: Option<(String, String)> = conn.query_row(
+                "SELECT i.item_type, f.path FROM items i JOIN files f ON i.id = f.id WHERE i.id = ?",
+                [&id_clone],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            ).ok();
 
-    let file_info: Option<(String, String)> = conn.query_row(
-        "SELECT i.item_type, f.path FROM items i JOIN files f ON i.id = f.id WHERE i.id = ?",
-        [&id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    ).ok();
+            let type_ws: Option<(String, String)> = conn.query_row(
+                "SELECT item_type, workspace_id FROM items WHERE id = ?",
+                [&id_clone],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            ).ok();
 
-    let type_ws: Option<(String, String)> = conn.query_row(
-        "SELECT item_type, workspace_id FROM items WHERE id = ?",
-        [&id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    ).ok();
-
-    // 1. Prepare Phase (Filesystem)
-    let mut staged_file = false;
-    let mut original_path = String::new();
-    if let Some((item_type, path)) = &file_info {
-        if item_type == "file" || item_type == "note" {
-            let app_data_dir = app_handle.path().app_data_dir().unwrap_or_default();
-            let files_dir = app_data_dir.join("Files");
-            let notes_dir = app_data_dir.join("Notes");
-            let p = std::path::Path::new(path);
-            if p.starts_with(files_dir) || p.starts_with(notes_dir) {
-                crate::fs_commands::move_file_to_trash(&app_handle, &id, path)?;
-                staged_file = true;
-                original_path = path.clone();
-                let filename = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                conn.execute(
-                    "INSERT OR REPLACE INTO trash_ledger (id, original_path, filename) VALUES (?1, ?2, ?3)",
-                    [&id, path, &filename],
-                ).map_err(|e| format!("Failed to update staging ledger: {}", e))?;
-            }
-        }
-    }
-
-    // 2. Commit Phase (Database)
-    let payload = format!(r#"{{"id":"{}"}}"#, id);
-    let res = execute_two_phase(&mut conn, "delete_item", &payload, |tx| {
-        let rows_changed = tx.execute(
-            "UPDATE items SET deleted = 1 WHERE id = ? AND deleted = 0",
-            [id.clone()],
-        ).map_err(|e| e.to_string())?;
-
-        if rows_changed == 0 {
-            return Err(format!("Item '{}' not found or already deleted", id));
-        }
-
-        Ok(DeletedId { id: id.clone() })
-    });
-
-    // 3. Compensation / Rollback or emit
-    match res {
-        Ok(val) => {
-            if let Some((item_type, ws)) = &type_ws {
-                if item_type != "automation" {
-                    automation::emit(&state, automation::events_for_deleted(&id, item_type, ws));
+            // 1. Prepare Phase
+            let mut staged_file = false;
+            let mut original_path = String::new();
+            if let Some((item_type, path)) = &file_info {
+                if item_type == "file" || item_type == "note" {
+                    let app_data_dir = app_handle.path().app_data_dir().unwrap_or_default();
+                    let files_dir = app_data_dir.join("Files");
+                    let notes_dir = app_data_dir.join("Notes");
+                    let p = std::path::Path::new(path);
+                    if p.starts_with(files_dir) || p.starts_with(notes_dir) {
+                        crate::fs_commands::move_file_to_trash(&app_handle, &id_clone, path)?;
+                        staged_file = true;
+                        original_path = path.clone();
+                        let filename = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        conn.execute(
+                            "INSERT OR REPLACE INTO trash_ledger (id, original_path, filename) VALUES (?1, ?2, ?3)",
+                            [&id_clone, path, &filename],
+                        ).map_err(|e| format!("Failed to update staging ledger: {}", e))?;
+                    }
                 }
             }
-            Ok(val)
-        }
-        Err(e) => {
-            if staged_file {
-                let _ = crate::fs_commands::restore_file_from_trash(&app_handle, &id, &original_path);
-                let _ = conn.execute("DELETE FROM trash_ledger WHERE id = ?", [&id]);
+
+            // 2. Commit Phase
+            let payload = format!(r#"{{"id":"{}"}}"#, id_clone);
+            let res_inner = execute_two_phase(&mut conn, "delete_item", &payload, |tx| {
+                let rows_changed = tx.execute(
+                    "UPDATE items SET deleted = 1 WHERE id = ? AND deleted = 0",
+                    [id_clone.clone()],
+                ).map_err(|e| e.to_string())?;
+
+                if rows_changed == 0 {
+                    return Err(format!("Item '{}' not found or already deleted", id_clone));
+                }
+
+                Ok(DeletedId { id: id_clone.clone() })
+            });
+
+            match res_inner {
+                Ok(val) => Ok((val, type_ws)),
+                Err(e) => {
+                    if staged_file {
+                        let _ = crate::fs_commands::restore_file_from_trash(&app_handle, &id_clone, &original_path);
+                        let _ = conn.execute("DELETE FROM trash_ledger WHERE id = ?", [&id_clone]);
+                    }
+                    Err(e)
+                }
             }
-            Err(e)
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)?;
+
+    let (val, type_ws) = db_res;
+    if let Some((item_type, ws)) = type_ws {
+        if item_type != "automation" {
+            automation::emit(&state, automation::events_for_deleted(&id, &item_type, &ws));
         }
     }
+    Ok(val)
 }
 
 pub(crate) fn restore_snapshot_impl(conn: &rusqlite::Connection, item: Item, links: Vec<Link>) -> Result<Item, String> {
@@ -751,8 +843,10 @@ pub(crate) fn restore_snapshot_impl(conn: &rusqlite::Connection, item: Item, lin
 }
 
 #[tauri::command]
-pub fn restore_snapshot(state: State<'_, AppState>, app_handle: tauri::AppHandle, item: Item, links: Vec<Link>) -> Result<Item, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn restore_snapshot(state: State<'_, AppState>, app_handle: tauri::AppHandle, item: Item, links: Vec<Link>) -> Result<Item, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     
     // Get path from trash_ledger or files table
     let original_path: Option<String> = conn.query_row(
@@ -788,6 +882,10 @@ pub fn restore_snapshot(state: State<'_, AppState>, app_handle: tauri::AppHandle
             Err(e)
         }
     }
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 pub(crate) fn verify_integrity_impl(conn: &rusqlite::Connection, id: String, expected_existence: bool) -> Result<bool, String> {
@@ -801,9 +899,15 @@ pub(crate) fn verify_integrity_impl(conn: &rusqlite::Connection, id: String, exp
 }
 
 #[tauri::command]
-pub fn verify_integrity(state: State<'_, AppState>, id: String, expected_existence: bool) -> Result<bool, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn verify_integrity(state: State<'_, AppState>, id: String, expected_existence: bool) -> Result<bool, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     verify_integrity_impl(&conn, id, expected_existence)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[derive(Serialize)]
@@ -813,8 +917,10 @@ pub struct SystemStateDump {
 }
 
 #[tauri::command]
-pub fn get_system_state(state: State<'_, AppState>, workspace_id: String) -> Result<SystemStateDump, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_system_state(state: State<'_, AppState>, workspace_id: String) -> Result<SystemStateDump, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
 
     let mut item_stmt = conn.prepare("SELECT id, item_type, title FROM items WHERE deleted = 0 AND workspace_id = ? ORDER BY id ASC").map_err(|e| e.to_string())?;
     let items_iter = item_stmt.query_map([&workspace_id], |row| {
@@ -845,12 +951,18 @@ pub fn get_system_state(state: State<'_, AppState>, workspace_id: String) -> Res
     }
 
     Ok(SystemStateDump { items, links })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 #[tauri::command]
-pub fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?").map_err(|e| e.to_string())?;
     
     let mut rows = stmt.query([key]).map_err(|e| e.to_string())?;
@@ -860,17 +972,27 @@ pub fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<Str
     } else {
         Ok(None)
     }
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = CURRENT_TIMESTAMP",
         [&key, &value],
     ).map_err(|e| e.to_string())?;
     Ok(())
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
@@ -885,8 +1007,10 @@ pub struct LedgerEntry {
 }
 
 #[tauri::command]
-pub fn get_mutation_ledger(state: State<'_, AppState>) -> Result<Vec<LedgerEntry>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_mutation_ledger(state: State<'_, AppState>) -> Result<Vec<LedgerEntry>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     let mut stmt = conn.prepare("SELECT id, command_type, payload, status, created_at FROM mutation_ledger ORDER BY created_at DESC LIMIT 100").map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(LedgerEntry {
@@ -903,6 +1027,10 @@ pub fn get_mutation_ledger(state: State<'_, AppState>) -> Result<Vec<LedgerEntry
         entries.push(row.map_err(|e| e.to_string())?);
     }
     Ok(entries)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[derive(Serialize)]
@@ -916,8 +1044,10 @@ pub struct SystemHealth {
 }
 
 #[tauri::command]
-pub fn get_system_health(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<SystemHealth, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_system_health(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<SystemHealth, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     
     let active_items: usize = conn.query_row("SELECT count(*) FROM items WHERE deleted = 0", [], |row| row.get(0)).unwrap_or(0);
     let active_links: usize = conn.query_row("SELECT count(*) FROM links", [], |row| row.get(0)).unwrap_or(0);
@@ -940,11 +1070,17 @@ pub fn get_system_health(state: State<'_, AppState>, app_handle: tauri::AppHandl
         orphaned_links,
         last_integrity_check: chrono::Local::now().to_rfc3339(),
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 #[tauri::command]
-pub fn repair_integrity(state: State<'_, AppState>) -> Result<IntegrityResult, String> {
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn repair_integrity(state: State<'_, AppState>) -> Result<IntegrityResult, String> {
+    state.db.call(move |mut conn| {
+        let res = (|| -> Result<_, String> {
+
     let payload = r#"{}"#;
     execute_two_phase(&mut conn, "repair_integrity", payload, |tx| {
         // 1. Delete orphan links
@@ -967,9 +1103,12 @@ pub fn repair_integrity(state: State<'_, AppState>) -> Result<IntegrityResult, S
         Ok(())
     })?;
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
     let integrity = verify_integrity_all(&conn)?;
     Ok(integrity)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 

@@ -3,7 +3,7 @@ use rusqlite::{Connection, Result};
 // Current logical schema version. Bump when a structural migration is added below.
 // Tracked via SQLite's PRAGMA user_version so a migration runs at most once and an
 // imported/restored DB can be checked for compatibility.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn setup_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -26,6 +26,11 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
             user_size_preference TEXT,
             metadata TEXT DEFAULT '{}',
             deleted BOOLEAN DEFAULT 0,
+            status TEXT,
+            priority TEXT,
+            due TEXT,
+            progress INTEGER,
+            tag TEXT,
             FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
         );
 
@@ -139,6 +144,10 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
         -- Phase 7: scheduler last_attempt + prune both filter by automation_id and sort
         -- by started_at DESC. A composite serves both without a separate sort step.
         CREATE INDEX IF NOT EXISTS idx_exec_auto_started ON automation_executions(automation_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
+        CREATE INDEX IF NOT EXISTS idx_items_priority ON items(priority);
+        CREATE INDEX IF NOT EXISTS idx_items_due ON items(due);
+        CREATE INDEX IF NOT EXISTS idx_items_tag ON items(tag);
         "#
     )?;
 
@@ -243,6 +252,13 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE items ADD COLUMN user_size_preference TEXT", []);
     let _ = conn.execute("ALTER TABLE items ADD COLUMN metadata TEXT DEFAULT '{}'", []);
     let _ = conn.execute("ALTER TABLE items ADD COLUMN deleted BOOLEAN DEFAULT 0", []);
+
+    // Soft-migration: Promote JSON fields
+    let _ = conn.execute("ALTER TABLE items ADD COLUMN status TEXT", []);
+    let _ = conn.execute("ALTER TABLE items ADD COLUMN priority TEXT", []);
+    let _ = conn.execute("ALTER TABLE items ADD COLUMN due TEXT", []);
+    let _ = conn.execute("ALTER TABLE items ADD COLUMN progress INTEGER", []);
+    let _ = conn.execute("ALTER TABLE items ADD COLUMN tag TEXT", []);
     
     // Soft-migration: Create the dashboard_widgets table in existing DBs
     let _ = conn.execute(

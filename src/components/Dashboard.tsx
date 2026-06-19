@@ -56,6 +56,7 @@ function WidgetShell({
 
   return (
     <motion.section
+      id={`widget-${layout.id}`}
       layout={!isDragging}
       transition={interacting ? { duration: 0 } : springBase}
       variants={listItem}
@@ -614,8 +615,30 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [resizingId, setResizingId] = useState<string | null>(null);
   const [dragOffset, setDragOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
-  const resizeRef = useRef<{ id: string, direction: "w" | "h" | "both", initW: number, initH: number, startX: number, startY: number, initialLayout: DashboardWidget[] } | null>(null);
-  const dragInfoRef = useRef<{ id: string, grabX: number, grabY: number, startX: number, startY: number, initX: number, initY: number, active: boolean, initialLayout: DashboardWidget[] } | null>(null);
+  const resizeRef = useRef<{
+    id: string;
+    direction: "w" | "h" | "both";
+    initW: number;
+    initH: number;
+    startX: number;
+    startY: number;
+    lastW: number;
+    lastH: number;
+    initialLayout: DashboardWidget[];
+  } | null>(null);
+  const dragInfoRef = useRef<{
+    id: string;
+    grabX: number;
+    grabY: number;
+    startX: number;
+    startY: number;
+    initX: number;
+    initY: number;
+    lastX: number;
+    lastY: number;
+    active: boolean;
+    initialLayout: DashboardWidget[];
+  } | null>(null);
   const latestLayoutRef = useRef<DashboardWidget[] | null>(null);
 
   useEffect(() => {
@@ -646,10 +669,15 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
       newH = ref.initH + Math.round(deltaY / cellH);
     }
 
-    const currentLayout = ref.initialLayout;
-    if (!currentLayout) return;
-    const next = resizeElement(currentLayout, ref.id, newW, newH);
-    setActiveLayout(next);
+    if (newW !== ref.lastW || newH !== ref.lastH) {
+      ref.lastW = newW;
+      ref.lastH = newH;
+
+      const currentLayout = ref.initialLayout;
+      if (!currentLayout) return;
+      const next = resizeElement(currentLayout, ref.id, newW, newH);
+      setActiveLayout(next);
+    }
   }, []);
 
   const handleResizePointerUp = useCallback(() => {
@@ -680,6 +708,8 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
       initH: widget.h,
       startX: e.clientX,
       startY: e.clientY,
+      lastW: widget.w,
+      lastH: widget.h,
       initialLayout: activeLayout!
     };
     setResizingId(id);
@@ -692,18 +722,32 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
     if (!dragInfoRef.current) return;
     const ref = dragInfoRef.current;
 
+    const dx = e.clientX - ref.startX;
+    const dy = e.clientY - ref.startY;
+
     // Movement threshold — a plain click on the header never starts a drag.
     if (!ref.active) {
-      const dist = Math.hypot(e.clientX - ref.startX, e.clientY - ref.startY);
+      const dist = Math.hypot(dx, dy);
       if (dist < 5) return;
       ref.active = true;
+      
+      const snapDx = Math.round(dx / 20) * 20;
+      const snapDy = Math.round(dy / 20) * 20;
+
       setDraggedId(ref.id);
+      setDragOffset({ dx: snapDx, dy: snapDy });
     }
 
     // Live pixel offset — snap the dragged widget visually to a 20px grid.
-    const dx = e.clientX - ref.startX;
-    const dy = e.clientY - ref.startY;
-    setDragOffset({ dx: Math.round(dx / 20) * 20, dy: Math.round(dy / 20) * 20 });
+    const snapDx = Math.round(dx / 20) * 20;
+    const snapDy = Math.round(dy / 20) * 20;
+
+    // Update DOM directly for visual performance
+    const widgetEl = document.getElementById(`widget-${ref.id}`);
+    if (widgetEl) {
+      widgetEl.style.transform = `translate(${snapDx}px, ${snapDy}px)`;
+      widgetEl.style.zIndex = "50";
+    }
 
     const gridEl = document.querySelector(".dash-grid");
     if (!gridEl) return;
@@ -715,10 +759,16 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
     const x = Math.round((e.clientX - rect.left - ref.grabX) / cellW);
     const y = Math.round((e.clientY - rect.top - ref.grabY) / cellH);
 
-    const currentLayout = ref.initialLayout;
-    if (!currentLayout) return;
-    const next = moveElement(currentLayout, ref.id, x, y);
-    setActiveLayout(next);
+    if (x !== ref.lastX || y !== ref.lastY) {
+      ref.lastX = x;
+      ref.lastY = y;
+
+      const currentLayout = ref.initialLayout;
+      if (!currentLayout) return;
+      const next = moveElement(currentLayout, ref.id, x, y);
+      setActiveLayout(next);
+      setDragOffset({ dx: snapDx, dy: snapDy });
+    }
   }, []);
 
   const handleDragPointerUp = useCallback(() => {
@@ -727,6 +777,12 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
     (window as any).__loomInternalDrag = false;
 
     if (dragInfoRef.current) {
+      const widgetEl = document.getElementById(`widget-${dragInfoRef.current.id}`);
+      if (widgetEl) {
+        widgetEl.style.transform = "";
+        widgetEl.style.zIndex = "";
+      }
+
       // Persist only when an actual move happened — a plain header click is a no-op.
       if (dragInfoRef.current.active && latestLayoutRef.current) {
         store.saveDashboard(latestLayoutRef.current);
@@ -767,6 +823,8 @@ export function Dashboard({ editing, setEditing }: DashboardProps) {
       startY: e.clientY,
       initX: widget.x,
       initY: widget.y,
+      lastX: widget.x,
+      lastY: widget.y,
       active: false,
       initialLayout: activeLayout!
     };

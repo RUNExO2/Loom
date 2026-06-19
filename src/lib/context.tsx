@@ -1,5 +1,5 @@
 import React, { createContext, useContext } from "react";
-import { ThemePref } from "./settings";
+import { ThemePref, NavStyle } from "./settings";
 
 export interface ToastAction { label: string; onClick: () => void; }
 export type ToastKind = "success" | "error" | "warning" | "info";
@@ -17,6 +17,8 @@ export interface LoomContextType {
   setAccent: (a: string) => void;
   dragTargetId: string | null;
   setDragTargetId: (id: string | null) => void;
+  navStyle: NavStyle;
+  setNavStyle: (style: NavStyle) => void;
 }
 
 export const LoomCtx = createContext<LoomContextType | null>(null);

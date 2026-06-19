@@ -33,8 +33,10 @@ fn parse_created_at(s: &str) -> Option<DateTime<Local>> {
 }
 
 #[tauri::command]
-pub fn get_timeline(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<TimelineEvent>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_timeline(state: State<'_, AppState>, workspace_id: String) -> Result<Vec<TimelineEvent>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     // Projections aggregate over the whole workspace, so pass the unbounded sentinel
     // limit (matches get_items default) rather than a paginated slice.
     let items = get_active_items(&conn, &workspace_id, 1_000_000, 0)?;
@@ -131,6 +133,10 @@ pub fn get_timeline(state: State<'_, AppState>, workspace_id: String) -> Result<
 
     events.sort_by(|a, b| b.ts.cmp(&a.ts));
     Ok(events)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
 // ---- Stats ----
@@ -169,8 +175,10 @@ pub struct StatsProjection {
 }
 
 #[tauri::command]
-pub fn get_stats(state: State<'_, AppState>, workspace_id: String) -> Result<StatsProjection, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+pub async fn get_stats(state: State<'_, AppState>, workspace_id: String) -> Result<StatsProjection, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
     // Stats count the entire workspace; unbounded sentinel limit, no pagination.
     let items = get_active_items(&conn, &workspace_id, 1_000_000, 0)?;
 
@@ -258,4 +266,8 @@ pub fn get_stats(state: State<'_, AppState>, workspace_id: String) -> Result<Sta
         seriesMax: series_max,
         hasSeries: series_max > 0,
     })
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }

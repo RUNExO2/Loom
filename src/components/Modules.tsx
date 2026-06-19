@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import * as Switch from "@radix-ui/react-switch";
+import * as Dialog from "@radix-ui/react-dialog";
 import { listStagger, listItem } from "../lib/motionVariants";
 import { I, cx, useLoom, clickable } from "../lib/context";
 import { EntityChip, EmptyState } from "./shared";
 import { Item } from "../ipc/items";
 import { useNotes, useLibrary, useVault, useAutomations, useItemStore, useFiles } from "../lib/itemStore";
 import { vaultSession } from "../lib/vaultSession";
+import { useViewMemory } from "../lib/viewMemory";
 import { getNoteMeta, getLibraryMeta, getVaultMeta, getAutomationMeta } from "../lib/meta";
 import {
   runAutomationNow, getAutomationExecutions, getAutomationStats,
@@ -424,9 +426,9 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   const { links, items: allItems, workspaceId } = useItemStore();
   const loading = !ready;
 
-  const [activeId, setActiveId] = useState<string | null>(focusId || null);
-  const [q, setQ] = useState("");
-  const [folderFilter, setFolderFilter] = useState<string>("all");
+  const [activeId, setActiveId] = useViewMemory<string | null>("notes.active", focusId || null);
+  const [q, setQ] = useViewMemory("notes.query", "");
+  const [folderFilter, setFolderFilter] = useViewMemory("notes.folder", "all");
   const [contentHtml, setContentHtml] = useState<string>("");
   const [isEditing, setIsEditing] = useState<boolean>(false);
   const [fontSize, setFontSize] = useState<number>(14);
@@ -658,7 +660,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   };
 
   const handleNewNote = async () => {
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "New note", icon: "ph-note-pencil", accent: "var(--h-notes)", submitLabel: "Create note",
       fields: [{ name: "title", label: "Title", placeholder: "Note title…", required: true }],
     });
@@ -676,7 +678,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 
   const handleRenameNote = async () => {
     if (!activeNote) return;
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Rename note", icon: "ph-pencil", accent: "var(--h-notes)", submitLabel: "Rename",
       fields: [{ name: "title", label: "New Title", defaultValue: activeNote.title, required: true }],
     });
@@ -1303,8 +1305,8 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 export function TimelineModule() {
   const { inspect } = useLoom();
   const { items } = useItemStore();
-  const [filter, setFilter] = useState("all");
-  const [tq, setTq] = useState("");
+  const [filter, setFilter] = useViewMemory("timeline.filter", "all");
+  const [tq, setTq] = useViewMemory("timeline.query", "");
   const kinds = TIMELINE_KINDS;
 
   // Read-model: timeline projection + kind/search filter + month grouping — all in the VM.
@@ -1428,7 +1430,7 @@ export function LibraryModule() {
   const { links } = useItemStore();
   const loading = !ready;
 
-  const [cat, setCat] = useState("all");
+  const [cat, setCat] = useViewMemory("library.cat", "all");
   const cats: [string, string][] = [
     ["all", "All"], ["anime", "Anime"], ["manga", "Manga"], ["manhwa", "Manhwa"], 
     ["manhua", "Manhua"], ["book", "Books"], ["movie", "Movies"], ["tv", "TV Shows"], ["game", "Games"]
@@ -1494,7 +1496,7 @@ export function LibraryModule() {
   }, [dragTargetId, items, updateMeta, toast, importFile, modal, setDragTargetId]);
 
   const handleNewItem = async () => {
-    const r1 = await modal.form({
+    const r1 = await modal.form({ panel: true,
       title: "Add Media (Step 1 of 2)", icon: "ph-stack", accent: "var(--h-library)", submitLabel: "Next",
       fields: [
         { name: "title", label: "Title", placeholder: "Title…", required: true },
@@ -1519,7 +1521,7 @@ export function LibraryModule() {
     const counts = isCountProgress(type);
     const [unitLabel] = UNIT_FOR[type] || ["Progress", ""];
     const unit = unitLabel.toLowerCase();
-    const r2 = await modal.form({
+    const r2 = await modal.form({ panel: true,
       title: "Add Media (Step 2 of 2)", icon: "ph-stack", accent: "var(--h-library)", submitLabel: "Next — Pick a Cover",
       fields: [
         { name: "status", label: "Status", type: "select", defaultValue: statusOptions[0].value, options: statusOptions },
@@ -1646,7 +1648,7 @@ export function LibraryModule() {
     }
 
     const [unitLabel] = UNIT_FOR[meta.mediaType] || ["Progress", ""];
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Update Progress", icon: "ph-trend-up", accent: "var(--h-library)", submitLabel: "Update",
       fields: [
         { name: "current", label: `Current ${unitLabel.toLowerCase()}`, defaultValue: String(meta.progress.current), type: "text" },
@@ -1680,7 +1682,7 @@ export function LibraryModule() {
     e.stopPropagation();
     const meta = getLibraryMeta(item);
     const statusOptions = statusOptionsFor(meta.mediaType);
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Edit item", icon: "ph-pencil", accent: "var(--h-library)", submitLabel: "Save changes",
       fields: [
         { name: "title", label: "Title", defaultValue: item.title, required: true },
@@ -1720,34 +1722,46 @@ export function LibraryModule() {
       </PageHead>
       
       {coverPicker && (
-        <div className="cover-picker-scrim" onClick={() => setCoverPicker(null)}>
-          <div className="cover-picker" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Select a cover">
-            <div className="cover-picker-head">
-              <div className="modal-ico" style={{ "--mod": "var(--h-library)" } as any}><I n="ph-image" w="fill" /></div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: "var(--fs-base)" }}>Pick a cover for “{coverPicker.query}”</div>
-                <div className="ghost mono-sm" style={{ fontSize: "var(--fs-2xs)" }}>Set {coverPicker.page} · saved locally to your Covers folder</div>
+        <Dialog.Root open onOpenChange={(o) => { if (!o) setCoverPicker(null); }}>
+          <Dialog.Portal>
+            <Dialog.Overlay asChild>
+              <div className="cover-picker-scrim">
+                <Dialog.Content asChild aria-describedby={undefined}>
+                  <div className="cover-picker" onClick={(e) => e.stopPropagation()}>
+                    <div className="cover-picker-head">
+                      <div className="modal-ico" style={{ "--mod": "var(--h-library)" } as any}><I n="ph-image" w="fill" /></div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <Dialog.Title asChild>
+                          <div style={{ fontWeight: 600, fontSize: "var(--fs-base)" }}>Pick a cover for “{coverPicker.query}”</div>
+                        </Dialog.Title>
+                        <div className="ghost mono-sm" style={{ fontSize: "var(--fs-2xs)" }}>Set {coverPicker.page} · saved locally to your Covers folder</div>
+                      </div>
+                      <button className="btn sm" onClick={handleUploadCover} title="Use an image from your computer">
+                        <I n="ph-upload-simple" /> Upload
+                      </button>
+                      <button className="btn sm" onClick={() => openCoverPicker(coverPicker.itemId, coverPicker.query, coverPicker.mediaType, coverPicker.page + 1)} disabled={coverPicker.loading} title="Fetch a different set of covers">
+                        <I n="ph-arrows-clockwise" /> Refresh
+                      </button>
+                      <Dialog.Close asChild>
+                        <button className="btn icon sm" title="Skip — keep default cover" aria-label="Close cover picker"><I n="ph-x" /></button>
+                      </Dialog.Close>
+                    </div>
+                    <div className="cover-picker-grid">
+                      {coverPicker.loading
+                        ? Array.from({ length: 10 }).map((_, i) => <div key={i} className="skeleton" style={{ aspectRatio: "2/3", borderRadius: "var(--r-md)" }} />)
+                        : coverPicker.candidates.map((c, i) => (
+                          <CoverOption key={i} c={c} onPick={() => handlePickCover(c.url)} />
+                        ))}
+                      {!coverPicker.loading && coverPicker.candidates.length === 0 && (
+                        <div className="muted" style={{ gridColumn: "1 / -1", textAlign: "center", padding: 30 }}>No covers found. Try Refresh or close to keep the default.</div>
+                      )}
+                    </div>
+                  </div>
+                </Dialog.Content>
               </div>
-              <button className="btn sm" onClick={handleUploadCover} title="Use an image from your computer">
-                <I n="ph-upload-simple" /> Upload
-              </button>
-              <button className="btn sm" onClick={() => openCoverPicker(coverPicker.itemId, coverPicker.query, coverPicker.mediaType, coverPicker.page + 1)} disabled={coverPicker.loading} title="Fetch a different set of covers">
-                <I n="ph-arrows-clockwise" /> Refresh
-              </button>
-              <button className="btn icon sm" onClick={() => setCoverPicker(null)} title="Skip — keep default cover" aria-label="Close cover picker"><I n="ph-x" /></button>
-            </div>
-            <div className="cover-picker-grid">
-              {coverPicker.loading
-                ? Array.from({ length: 10 }).map((_, i) => <div key={i} className="skeleton" style={{ aspectRatio: "2/3", borderRadius: "var(--r-md)" }} />)
-                : coverPicker.candidates.map((c, i) => (
-                  <CoverOption key={i} c={c} onPick={() => handlePickCover(c.url)} />
-                ))}
-              {!coverPicker.loading && coverPicker.candidates.length === 0 && (
-                <div className="muted" style={{ gridColumn: "1 / -1", textAlign: "center", padding: 30 }}>No covers found. Try Refresh or close to keep the default.</div>
-              )}
-            </div>
-          </div>
-        </div>
+            </Dialog.Overlay>
+          </Dialog.Portal>
+        </Dialog.Root>
       )}
 
       {loading ? (
@@ -1874,7 +1888,7 @@ export function VaultModule() {
 
   const handleAdd = async () => {
     if (!isVaultUnlocked) return;
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Add Vault Credential",
       icon: "ph-shield-plus",
       accent: "var(--h-vault)",
@@ -1924,7 +1938,7 @@ export function VaultModule() {
 
   const handleEdit = async (item: Item, meta: any, currentSecret: string) => {
     if (!isVaultUnlocked) return;
-    const r = await modal.form({
+    const r = await modal.form({ panel: true,
       title: "Edit Vault Credential",
       icon: "ph-pencil",
       accent: "var(--h-vault)",
