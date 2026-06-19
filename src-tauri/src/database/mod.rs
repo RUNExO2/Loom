@@ -133,6 +133,17 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL DEFAULT 'PENDING',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        -- Saved searches: a named search query the user can re-run from the palette.
+        -- scope 'workspace' pins it to one workspace_id; scope 'all' is cross-workspace
+        -- (workspace_id NULL) and surfaces in every workspace's saved list.
+        CREATE TABLE IF NOT EXISTS saved_searches (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            query TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'workspace',
+            workspace_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_exec_automation ON automation_executions(automation_id);
         CREATE INDEX IF NOT EXISTS idx_exec_started ON automation_executions(started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_exec_status ON automation_executions(status);

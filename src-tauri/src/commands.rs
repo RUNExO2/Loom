@@ -343,44 +343,174 @@ pub async fn get_items(state: State<'_, AppState>, workspace_id: String, limit: 
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
-// Turn free-text into a safe FTS5 prefix MATCH expression: every whitespace token
-// becomes a quoted prefix term ("tok"*), AND-combined. Punctuation is stripped so a
-// user query can never inject FTS5 operators (which would error the statement).
-// Returns "" for an all-punctuation/empty query, signalling "no results".
-fn build_fts_match(query: &str) -> String {
-    let mut terms: Vec<String> = Vec::new();
-    for raw in query.split_whitespace() {
-        let cleaned: String = raw.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
-        if cleaned.is_empty() {
-            continue;
+// ── Advanced search query parser ─────────────────────────────────────────────
+// Turns free text into a safe FTS5 MATCH expression plus structured filters.
+// Supported syntax (all optional, combine freely):
+//   foo bar          implicit AND of prefix terms  ("foo"* "bar"*)
+//   "exact phrase"   quoted phrase, matched verbatim (no prefix expansion)
+//   foo OR bar       explicit OR
+//   -foo  /  NOT foo exclude a term
+//   type:task        restrict to item_type(s); comma-lists, e.g. type:task,note
+//   #tag             treated as a normal term (tags are folded into FTS content)
+// Every term is stripped to [alphanumeric_] before being quoted, so a user can
+// never inject raw FTS5 operators (which would error the MATCH statement).
+struct ParsedQuery {
+    /// FTS5 MATCH expression. Empty = no full-text constraint.
+    match_expr: String,
+    /// item_type filters pulled out of `type:` tokens.
+    types: Vec<String>,
+}
+
+fn sanitize_term(raw: &str) -> String {
+    raw.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
+}
+
+// Split on whitespace but keep "quoted phrases" as one token. Returns (text, is_quoted).
+fn tokenize_query(query: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    for c in query.chars() {
+        if c == '"' {
+            if in_quote {
+                out.push((std::mem::take(&mut cur), true));
+                in_quote = false;
+            } else {
+                if !cur.is_empty() { out.push((std::mem::take(&mut cur), false)); }
+                in_quote = true;
+            }
+        } else if c.is_whitespace() && !in_quote {
+            if !cur.is_empty() { out.push((std::mem::take(&mut cur), false)); }
+        } else {
+            cur.push(c);
         }
-        terms.push(format!("\"{}\"*", cleaned));
     }
-    terms.join(" ")
+    if !cur.is_empty() { out.push((cur, in_quote)); }
+    out
+}
+
+fn parse_query(query: &str) -> ParsedQuery {
+    let mut types: Vec<String> = Vec::new();
+    let mut atoms: Vec<String> = Vec::new(); // positive atoms, may include "OR" separators
+    let mut negs: Vec<String> = Vec::new();
+    let mut pending_or = false;
+    let mut pending_not = false;
+
+    for (tok, quoted) in tokenize_query(query) {
+        if !quoted {
+            // Boolean keywords, only recognised as bare words.
+            if tok.eq_ignore_ascii_case("or") { pending_or = true; continue; }
+            if tok.eq_ignore_ascii_case("not") { pending_not = true; continue; }
+            // Field filter: type:task,note
+            let lower = tok.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("type:") {
+                for t in rest.split(',') {
+                    let t = sanitize_term(t);
+                    if !t.is_empty() { types.push(t); }
+                }
+                continue;
+            }
+        }
+
+        // Negation via leading '-' or a preceding bare NOT.
+        let mut body = tok.clone();
+        let mut is_neg = pending_not;
+        pending_not = false;
+        if !quoted {
+            while body.starts_with('-') { is_neg = true; body.remove(0); }
+        }
+
+        let atom = if quoted {
+            let words: Vec<String> = body
+                .split_whitespace()
+                .map(sanitize_term)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if words.is_empty() { pending_or = false; continue; }
+            format!("\"{}\"", words.join(" "))
+        } else {
+            // leading '#' on tags is dropped by sanitize_term
+            let cleaned = sanitize_term(&body);
+            if cleaned.is_empty() { pending_or = false; continue; }
+            format!("\"{}\"*", cleaned)
+        };
+
+        if is_neg {
+            negs.push(atom);
+            pending_or = false;
+        } else {
+            if pending_or && !atoms.is_empty() { atoms.push("OR".to_string()); }
+            atoms.push(atom);
+            pending_or = false;
+        }
+    }
+
+    let mut match_expr = String::new();
+    if !atoms.is_empty() {
+        let pos = atoms.join(" ");
+        match_expr = if negs.is_empty() { pos } else { format!("({})", pos) };
+        for n in &negs {
+            match_expr.push_str(" NOT ");
+            match_expr.push_str(n);
+        }
+    }
+    ParsedQuery { match_expr, types }
 }
 
 #[tauri::command]
-pub async fn search_items(state: State<'_, AppState>, workspace_id: String, query: String) -> Result<Vec<Item>, String> {
+pub async fn search_items(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    query: String,
+    all_workspaces: Option<bool>,
+) -> Result<Vec<Item>, String> {
+    let all_ws = all_workspaces.unwrap_or(false);
     state.db.call(move |conn| {
         let res = (|| -> Result<_, String> {
 
-    // Phase 7: FTS5 prefix search over title + item_type. Replaces the old triple
-    // `LIKE %q%` full-table scan (which also scanned every metadata JSON blob and
-    // could not use any index). `MATCH` hits the FTS index; results come back ranked.
-    let match_query = build_fts_match(&query);
-    if match_query.is_empty() {
+    // Advanced parse → FTS5 MATCH + structured filters. BM25 column weighting
+    // favours title over body content, item_type lowest. A query that is only a
+    // `type:` filter (no full-text) still works — it lists by recency.
+    let parsed = parse_query(&query);
+    let has_match = !parsed.match_expr.is_empty();
+    if !has_match && parsed.types.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut stmt = conn.prepare(
+    let mut sql = String::from(
         "SELECT i.id, i.workspace_id, i.item_type, i.title, i.created_at, i.user_pinned, i.user_size_preference, i.metadata \
-         FROM items_fts \
-         JOIN items i ON i.id = items_fts.item_id \
-         WHERE items_fts MATCH ?1 AND i.workspace_id = ?2 AND i.deleted = 0 \
-         ORDER BY rank"
-    ).map_err(|e| e.to_string())?;
+         FROM items i ",
+    );
+    let mut params: Vec<String> = Vec::new();
+    let mut wheres: Vec<String> = vec!["i.deleted = 0".to_string()];
 
-    let rows = stmt.query_map(rusqlite::params![match_query, workspace_id], |row| {
+    if has_match {
+        sql.push_str("JOIN items_fts ON items_fts.item_id = i.id ");
+        wheres.push("items_fts MATCH ?".to_string());
+        params.push(parsed.match_expr.clone());
+    }
+    if !all_ws {
+        wheres.push("i.workspace_id = ?".to_string());
+        params.push(workspace_id.clone());
+    }
+    if !parsed.types.is_empty() {
+        let ph = parsed.types.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        wheres.push(format!("i.item_type IN ({})", ph));
+        for t in &parsed.types { params.push(t.clone()); }
+    }
+
+    sql.push_str("WHERE ");
+    sql.push_str(&wheres.join(" AND "));
+    if has_match {
+        // items_fts columns: item_id(UNINDEXED), title, item_type, content.
+        sql.push_str(" ORDER BY bm25(items_fts, 0.0, 10.0, 2.0, 4.0)");
+    } else {
+        sql.push_str(" ORDER BY i.created_at DESC");
+    }
+    sql.push_str(" LIMIT 300");
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok(Item {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
@@ -399,6 +529,86 @@ pub async fn search_items(state: State<'_, AppState>, workspace_id: String, quer
     }
     Ok(items)
 
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+// ── Saved searches ────────────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SavedSearch {
+    pub id: String,
+    pub name: String,
+    pub query: String,
+    pub scope: String, // "workspace" | "all"
+    pub workspace_id: Option<String>,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub async fn create_saved_search(
+    state: State<'_, AppState>,
+    name: String,
+    query: String,
+    scope: String,
+    workspace_id: Option<String>,
+) -> Result<SavedSearch, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            let id = uuid::Uuid::new_v4().to_string();
+            let scope = if scope == "all" { "all" } else { "workspace" }.to_string();
+            // A cross-workspace ('all') search is not pinned to any workspace.
+            let ws = if scope == "all" { None } else { workspace_id.clone() };
+            conn.execute(
+                "INSERT INTO saved_searches (id, name, query, scope, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, name, query, scope, ws],
+            ).map_err(|e| e.to_string())?;
+            let created_at: String = conn.query_row(
+                "SELECT created_at FROM saved_searches WHERE id = ?1",
+                [&id], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            Ok(SavedSearch { id, name, query, scope, workspace_id: ws, created_at })
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+#[tauri::command]
+pub async fn get_saved_searches(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<SavedSearch>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            // This workspace's saved searches plus any cross-workspace ('all') ones.
+            let mut stmt = conn.prepare(
+                "SELECT id, name, query, scope, workspace_id, created_at FROM saved_searches \
+                 WHERE scope = 'all' OR workspace_id = ?1 ORDER BY created_at DESC",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&workspace_id], |row| {
+                Ok(SavedSearch {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    query: row.get(2)?,
+                    scope: row.get(3)?,
+                    workspace_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            }).map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+            Ok(out)
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+#[tauri::command]
+pub async fn delete_saved_search(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            conn.execute("DELETE FROM saved_searches WHERE id = ?1", [&id]).map_err(|e| e.to_string())?;
+            Ok(())
         })();
         Ok(res)
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
@@ -1115,6 +1325,47 @@ pub async fn repair_integrity(state: State<'_, AppState>) -> Result<IntegrityRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_plain_terms_are_and_prefixed() {
+        let p = parse_query("foo bar");
+        assert_eq!(p.match_expr, "\"foo\"* \"bar\"*");
+        assert!(p.types.is_empty());
+    }
+
+    #[test]
+    fn parse_type_filter_is_extracted() {
+        let p = parse_query("type:task,note urgent");
+        assert_eq!(p.types, vec!["task", "note"]);
+        assert_eq!(p.match_expr, "\"urgent\"*");
+    }
+
+    #[test]
+    fn parse_phrase_or_and_negation() {
+        let p = parse_query("\"design system\" OR theme -draft");
+        assert_eq!(p.match_expr, "(\"design system\" OR \"theme\"*) NOT \"draft\"*");
+    }
+
+    #[test]
+    fn parse_strips_fts_operators_safely() {
+        // Raw FTS operators in a bare term must be neutralised, not passed through.
+        let p = parse_query("foo(bar)*");
+        assert_eq!(p.match_expr, "\"foobar\"*");
+    }
+
+    #[test]
+    fn parse_type_only_has_no_match_expr() {
+        let p = parse_query("type:project");
+        assert!(p.match_expr.is_empty());
+        assert_eq!(p.types, vec!["project"]);
+    }
+
+    #[test]
+    fn parse_empty_is_empty() {
+        let p = parse_query("   ");
+        assert!(p.match_expr.is_empty());
+        assert!(p.types.is_empty());
+    }
 
     #[test]
     fn test_db_queries() -> Result<(), Box<dyn std::error::Error>> {

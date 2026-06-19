@@ -1,7 +1,13 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { NAV, TYPE_ICON, TYPE_COLOR, TYPE_LABEL } from "../lib/typeMeta";
 import { I, cx, useLoom, clickable } from "../lib/context";
-import { searchItems } from "../ipc/search";
+import { searchItems, getSavedSearches, createSavedSearch, deleteSavedSearch, SavedSearch } from "../ipc/search";
+import { detectCapture } from "../lib/capture";
+
+// Quick Capture routes a detected item type to the module that owns it.
+const VIEW_FOR_TYPE: Record<string, string> = {
+  task: "tasks", note: "notes", bookmark: "bookmarks", calendar: "calendar",
+};
 import { useItemStore } from "../lib/itemStore";
 import { getRecentOpened } from "../lib/viewMemory";
 import { useActions } from "../lib/actions";
@@ -25,7 +31,7 @@ function highlight(text: string, q: string) {
 interface CommandPaletteProps { onClose: () => void; }
 export function CommandPalette({ onClose }: CommandPaletteProps) {
   const ctx = useLoom();
-  const { workspaceId, items: allItems } = useItemStore();
+  const { workspaceId, items: allItems, create } = useItemStore();
   const { dispatch, actions } = useActions();
   // Palette-shaped command items from the single action registry — one source.
   const commandItems = useMemo(
@@ -35,18 +41,41 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const [searchResults, setSearchResults] = useState<any[]>([]);
+  // Cross-workspace toggle: when on, search scans every workspace, not just this one.
+  const [allWs, setAllWs] = useState(false);
+  const [saved, setSaved] = useState<SavedSearch[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
 
+  const loadSaved = useCallback(() => {
+    if (!workspaceId) { setSaved([]); return; }
+    getSavedSearches(workspaceId).then(setSaved).catch(() => setSaved([]));
+  }, [workspaceId]);
+  useEffect(() => { loadSaved(); }, [loadSaved]);
+
+  // Persist the current query as a named saved search (Ctrl/⌘+S). Name defaults to
+  // the query text; scope follows the current cross-workspace toggle.
+  const saveCurrent = useCallback(() => {
+    const query = q.trim();
+    if (!query || !workspaceId) return;
+    createSavedSearch(query, query, allWs ? "all" : "workspace", workspaceId)
+      .then(() => loadSaved())
+      .catch(() => {});
+  }, [q, workspaceId, allWs, loadSaved]);
+
+  const removeSaved = useCallback((id: string) => {
+    deleteSavedSearch(id).then(() => loadSaved()).catch(() => {});
+  }, [loadSaved]);
+
   useEffect(() => {
-    if (!q.trim() || !workspaceId) {
+    if (!q.trim() || !workspaceId || /^\s*capture:/i.test(q)) {
       setSearchResults([]);
       return;
     }
     const timer = setTimeout(() => {
-      searchItems(q.trim(), workspaceId).then((items) => {
+      searchItems(q.trim(), workspaceId, allWs).then((items) => {
         const mapped = items.map((e) => {
           let meta: any = {};
           try { meta = JSON.parse(e.metadata || "{}"); } catch (err) { /* ignore */ }
@@ -75,7 +104,7 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
       });
     }, 150);
     return () => clearTimeout(timer);
-  }, [q, workspaceId]);
+  }, [q, workspaceId, allWs]);
 
   const corpus = useMemo(() => {
     const out: any[] = [];
@@ -86,7 +115,26 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
     return out;
   }, []);
 
+  // Capture mode: "Capture: <text>" (from the Ctrl+Shift+Space hotkey, or typed).
+  // The detected plan is shown as a single actionable row; Enter creates it.
+  const captureMatch = q.match(/^\s*capture:\s*(.*)$/i);
+  const captureBody = captureMatch ? captureMatch[1].trim() : "";
+
   const results = useMemo(() => {
+    if (captureMatch) {
+      if (!captureBody) {
+        return { groups: [{ title: "Quick Capture", items: [
+          { id: "capture-hint", label: "Type to capture…", kind: "hint", icon: "ph-lightning", color: "var(--accent)",
+            sub: "Detects task · bookmark · note · event automatically" },
+        ] }] };
+      }
+      const plan = detectCapture(captureBody);
+      return { groups: [{ title: "Quick Capture", items: [
+        { id: "capture-do", label: plan.title, kind: "capture", icon: plan.icon, color: plan.color,
+          sub: plan.reason, plan },
+      ] }] };
+    }
+
     const query = q.trim().toLowerCase();
 
     const formatEntity = (e: any) => {
@@ -129,8 +177,21 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
         return { item: i, ts: getUpdatedTs(i, meta) };
       }).sort((a: any, b: any) => b.ts - a.ts).slice(0, 4).map((e: any) => formatEntity(e.item));
 
+      const savedItems = saved.map((s) => ({
+        id: "saved-" + s.id,
+        label: s.name,
+        kind: "saved" as const,
+        icon: "ph-funnel",
+        color: "var(--accent)",
+        sub: (s.scope === "all" ? "All workspaces · " : "") + s.query,
+        savedQuery: s.query,
+        savedAll: s.scope === "all",
+        savedId: s.id,
+      }));
+
       return {
         groups: [
+          ...(savedItems.length ? [{ title: "Saved searches", items: savedItems }] : []),
           ...(recentOpened.length ? [{ title: "Recent: Opened", items: recentOpened }] : []),
           ...(recentEdited.length ? [{ title: "Recent: Edited", items: recentEdited }] : []),
           ...(recentCreated.length ? [{ title: "Recent: Created", items: recentCreated }] : []),
@@ -166,7 +227,7 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
     if (ents.length) groups.push({ title: `Results · ${ents.length}`, items: ents });
     if (!groups.length) groups.push({ title: "No matches", items: [] });
     return { groups };
-  }, [q, corpus, searchResults, commandItems]);
+  }, [q, corpus, searchResults, commandItems, saved, captureMatch, captureBody]);
 
   const flat = useMemo(() => results.groups.flatMap((g) => g.items), [results]);
   // Functional updater reads the freshest sel, so the effect needs only flat.length.
@@ -181,18 +242,44 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
 
   const choose = useCallback((item: any) => {
     if (!item) return;
+    // A saved search loads its query back into the palette instead of closing it.
+    if (item.kind === "saved") {
+      setQ(item.savedQuery);
+      setAllWs(!!item.savedAll);
+      setSel(0);
+      inputRef.current?.focus();
+      return;
+    }
+    if (item.kind === "hint") return; // non-actionable placeholder row
+    // The "Quick Capture" command seeds capture mode rather than navigating away.
+    if (item.kind === "command" && item.id === "cmd-capture") {
+      setQ("Capture: "); setSel(0); inputRef.current?.focus(); return;
+    }
+    // Quick Capture: create the detected item and open it in its module.
+    if (item.kind === "capture") {
+      onClose();
+      const plan = item.plan;
+      create(plan.type, plan.title, plan.meta)
+        .then((it: any) => { ctx.navigate(VIEW_FOR_TYPE[plan.type] || "dashboard"); ctx.inspect(it.id); })
+        .catch(() => {});
+      return;
+    }
     onClose();
     if (item.kind === "navigate") { ctx.navigate(item.navTo); return; }
     if (item.kind === "entity") { ctx.inspect(item.id); return; }
     // Every command routes through the single action dispatcher — no inline logic here.
     if (item.kind === "command") { dispatch(item.id); return; }
-  }, [ctx, onClose, dispatch]);
+  }, [ctx, onClose, dispatch, create]);
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(s + 1, flat.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setSel((s) => Math.max(s - 1, 0)); }
     else if (e.key === "Enter") { e.preventDefault(); choose(flat[sel]); }
     else if (e.key === "Escape") { e.preventDefault(); onClose(); }
+    // ⌘/Ctrl+S saves the current query as a named search.
+    else if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) { e.preventDefault(); saveCurrent(); }
+    // Alt+A toggles the cross-workspace scope.
+    else if (e.altKey && (e.key === "a" || e.key === "A")) { e.preventDefault(); setAllWs((v) => !v); }
   };
 
   useEffect(() => {
@@ -206,9 +293,14 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
       <div className="cmd">
         <div className="cmd-in">
           <I n="ph-magnifying-glass" />
-          <input ref={inputRef} value={q} placeholder='Search everything, run a command, or jump to…'
+          <input ref={inputRef} value={q} placeholder='Search ( type:task  "phrase"  foo OR bar  -skip ), run a command, jump…'
             onChange={(e) => { setQ(e.target.value); setSel(0); }} onKeyDown={onKey} />
-          {q ? <span className="cmd-scope">{flat.length} results</span> : <span className="kbd">ESC</span>}
+          <button type="button" className="cmd-scope" onClick={() => setAllWs((v) => !v)}
+            title="Toggle search scope (Alt+A)"
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer", background: "none", border: "1px solid var(--border-faint)", borderRadius: 6, padding: "2px 6px", color: allWs ? "var(--accent-text)" : "var(--text-faint)" }}>
+            <I n={allWs ? "ph-globe-hemisphere-west" : "ph-stack"} /> {allWs ? "All" : "This ws"}
+          </button>
+          {q ? <span className="cmd-scope">{flat.length}</span> : <span className="kbd">ESC</span>}
         </div>
 
         <div className="cmd-results" ref={listRef}>
@@ -229,7 +321,13 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
                       <div className="cmd-s">{item.sub}</div>
                     </div>
                     <span className="cmd-kind">{item.kind === "entity" ? TYPE_LABEL[item.type] : item.kind}</span>
-                    <span className="cmd-enter">↵</span>
+                    {item.kind === "saved"
+                      ? <button type="button" className="cmd-enter" title="Delete saved search"
+                          style={{ cursor: "pointer", background: "none", border: "none", color: "var(--text-faint)" }}
+                          onClick={(ev) => { ev.stopPropagation(); removeSaved(item.savedId); }}>
+                          <I n="ph-trash" />
+                        </button>
+                      : <span className="cmd-enter">↵</span>}
                   </div>
                 );
               })}
@@ -244,7 +342,8 @@ export function CommandPalette({ onClose }: CommandPaletteProps) {
         <div className="cmd-foot">
           <span className="fk"><span className="kbd">↑</span><span className="kbd">↓</span> navigate</span>
           <span className="fk"><span className="kbd">↵</span> open</span>
-          <span className="fk"><span className="kbd">⌘K</span> toggle</span>
+          <span className="fk"><span className="kbd">⌘S</span> save search</span>
+          <span className="fk"><span className="kbd">Alt</span><span className="kbd">A</span> scope</span>
           <span style={{ marginLeft: "auto" }} className="fk"><I n="ph-link" style={{ color: "var(--accent-text)" }} /> connected search</span>
         </div>
       </div>

@@ -266,16 +266,16 @@ pub async fn decrypt_vault_value(ciphertext_str: String, password: String) -> Re
 mod tests {
     use super::*;
 
-    #[test]
-    fn vault_value_roundtrip_is_versioned() {
-        let enc = encrypt_vault_value("hunter2".into(), "master".into()).unwrap();
+    #[tokio::test]
+    async fn vault_value_roundtrip_is_versioned() {
+        let enc = encrypt_vault_value("hunter2".into(), "master".into()).await.unwrap();
         assert!(enc.starts_with("v1:"), "new writes must use versioned envelope");
-        let dec = decrypt_vault_value(enc, "master".into()).unwrap();
+        let dec = decrypt_vault_value(enc, "master".into()).await.unwrap();
         assert_eq!(dec, "hunter2");
     }
 
-    #[test]
-    fn legacy_3part_value_still_decrypts() {
+    #[tokio::test]
+    async fn legacy_3part_value_still_decrypts() {
         // Build a pre-envelope blob exactly as the old code did: bare salt:nonce:ct,
         // default Argon2id params, no version tag. Must remain decryptable.
         let mut salt = [0u8; 16];
@@ -289,18 +289,18 @@ mod tests {
             .unwrap();
         let legacy = format!("{}:{}:{}", to_hex(&salt), to_hex(&nonce), to_hex(&ct));
 
-        let dec = decrypt_vault_value(legacy, "master".into()).unwrap();
+        let dec = decrypt_vault_value(legacy, "master".into()).await.unwrap();
         assert_eq!(dec, "legacy-secret");
     }
 
-    #[test]
-    fn wrong_password_is_rejected() {
-        let enc = encrypt_vault_value("s3cret".into(), "right".into()).unwrap();
-        assert!(decrypt_vault_value(enc, "wrong".into()).is_err());
+    #[tokio::test]
+    async fn wrong_password_is_rejected() {
+        let enc = encrypt_vault_value("s3cret".into(), "right".into()).await.unwrap();
+        assert!(decrypt_vault_value(enc, "wrong".into()).await.is_err());
     }
 
-    #[test]
-    fn future_params_decrypt_from_envelope() {
+    #[tokio::test]
+    async fn future_params_decrypt_from_envelope() {
         // Simulate a stronger-cost entry: params read from the blob, not from CURRENT.
         let kp = KdfParams { m_cost: 32768, t_cost: 3, p_cost: 1 };
         let mut salt = [0u8; 16];
@@ -317,7 +317,7 @@ mod tests {
             kp.m_cost, kp.t_cost, kp.p_cost,
             to_hex(&salt), to_hex(&nonce), to_hex(&ct)
         );
-        let dec = decrypt_vault_value(blob, "master".into()).unwrap();
+        let dec = decrypt_vault_value(blob, "master".into()).await.unwrap();
         assert_eq!(dec, "strong");
     }
 }
