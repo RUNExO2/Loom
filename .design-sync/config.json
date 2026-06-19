@@ -1,0 +1,26 @@
+{
+  "pkg": "loom",
+  "globalName": "Loom",
+  "projectId": "6454a427-81e3-4e7c-831c-5f6db51ec71a",
+  "shape": "package",
+  "tsconfig": "./tsconfig.json",
+  "componentSrcMap": {
+    "Button": "src/components/ui/Button.tsx",
+    "AsyncButton": "src/components/ui/AsyncButton.tsx",
+    "OverlayShell": "src/components/ui/OverlayShell.tsx"
+  },
+  "cssEntry": "loom-design-entry.css",
+  "runtimeFontPrefixes": ["Inter"],
+  "extraFonts": [
+    "dist/phosphor/regular/style.css",
+    "dist/phosphor/bold/style.css",
+    "dist/phosphor/fill/style.css"
+  ],
+  "readmeHeader": ".design-sync/conventions.md",
+  "overrides": {
+    "OverlayShell": {
+      "cardMode": "single",
+      "viewport": "640x480"
+    }
+  }
+}
