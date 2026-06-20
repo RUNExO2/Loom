@@ -1,6 +1,8 @@
 use crate::AppState;
 use crate::commands::execute_two_phase;
+use crate::commands::create_link_impl;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
@@ -856,6 +858,339 @@ pub async fn import_notes_from_folder(
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
+// ─────────────────────────── Advanced Obsidian vault importer ───────────────────────────
+// Handles the five things a plain markdown import drops: YAML frontmatter, #hashtags,
+// [[wikilinks]] (as real graph edges), ![[embeds]]/attachments (copied + registered), and
+// metadata extraction (tags/aliases/source persisted to item metadata).
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ObsidianImportResult {
+    pub imported: u32,
+    pub skipped: u32,
+    pub links_created: u32,
+    pub attachments: u32,
+}
+
+fn clean_scalar(s: &str) -> String {
+    let s = s.trim();
+    let s = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(s);
+    let s = s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')).unwrap_or(s);
+    s.trim().trim_start_matches('#').trim().to_string()
+}
+
+// Parse a leading `--- ... ---` YAML frontmatter block. Minimal by design — covers the
+// scalar / inline-list / dash-list shapes Obsidian actually emits. Returns (fields, body).
+fn parse_frontmatter(content: &str) -> (HashMap<String, Vec<String>>, String) {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let content = content.trim_start_matches('\u{feff}');
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.first().map(|l| l.trim()) != Some("---") {
+        return (map, content.to_string());
+    }
+    let mut end = None;
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        if line.trim() == "---" { end = Some(i); break; }
+    }
+    let end = match end { Some(e) => e, None => return (map, content.to_string()) };
+
+    let mut current_key: Option<String> = None;
+    for &line in &lines[1..end] {
+        let trimmed = line.trim_start();
+        if let Some(item) = trimmed.strip_prefix("- ") {
+            if let Some(k) = &current_key {
+                let v = clean_scalar(item);
+                if !v.is_empty() { map.entry(k.clone()).or_default().push(v); }
+            }
+            continue;
+        }
+        if let Some(colon) = line.find(':') {
+            let key = line[..colon].trim().to_lowercase();
+            let val = line[colon + 1..].trim();
+            current_key = Some(key.clone());
+            if val.is_empty() {
+                map.entry(key).or_default();
+            } else if val.starts_with('[') && val.ends_with(']') {
+                let inner = &val[1..val.len() - 1];
+                let vals: Vec<String> = inner.split(',').map(clean_scalar).filter(|s| !s.is_empty()).collect();
+                map.insert(key, vals);
+            } else if val.contains(',') {
+                let vals: Vec<String> = val.split(',').map(clean_scalar).filter(|s| !s.is_empty()).collect();
+                map.insert(key, vals);
+            } else {
+                map.insert(key, vec![clean_scalar(val)]);
+            }
+        }
+    }
+    let body = lines[end + 1..].join("\n");
+    (map, body)
+}
+
+// Resolve a wikilink target to a lookup key: strip any #heading and |alias, take the
+// basename, lowercase it. `[[Folder/Note#Sec|Label]]` -> "note".
+fn wikilink_key(target: &str) -> String {
+    let target = target.split('|').next().unwrap_or(target);
+    let target = target.split('#').next().unwrap_or(target);
+    let base = target.rsplit(['/', '\\']).next().unwrap_or(target);
+    base.trim().to_lowercase()
+}
+
+// Markdown → HTML with Obsidian extensions. Text is HTML-escaped first; the special
+// tokens ([[ ]], ![[ ]], [](), #tag, **, *, `) survive escaping and are then expanded to
+// real HTML. Collects wikilink targets and embed filenames for the caller to wire up.
+fn obsidian_md_to_html(
+    body: &str,
+    wikilinks: &mut Vec<String>,
+    embeds: &mut Vec<String>,
+) -> String {
+    let wl = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
+    let embed = regex::Regex::new(r"!\[\[([^\]]+)\]\]").unwrap();
+    let md_img = regex::Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
+    let md_link = regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap();
+    let hashtag = regex::Regex::new(r"(^|\s)#([A-Za-z0-9_][A-Za-z0-9_/-]*)").unwrap();
+    let bold = regex::Regex::new(r"\*\*([^*]+)\*\*").unwrap();
+    let italic = regex::Regex::new(r"\*([^*]+)\*").unwrap();
+    let code = regex::Regex::new(r"`([^`]+)`").unwrap();
+
+    let inline = |line: &str, wikilinks: &mut Vec<String>, embeds: &mut Vec<String>| -> String {
+        let mut s = escape_html(line);
+        // Embeds first (![[...]]) so they aren't eaten by the wikilink rule.
+        s = embed.replace_all(&s, |c: &regex::Captures| {
+            let name = c[1].split('|').next().unwrap_or(&c[1]).trim().to_string();
+            let idx = embeds.len();
+            embeds.push(name.clone());
+            format!("<a class=\"attachment-card\" data-attachment=\"__EMBED_{}__\"><i class=\"ph ph-paperclip\"></i> {}</a>", idx, escape_html(&name))
+        }).to_string();
+        // Markdown images -> attachment placeholder too (path-based).
+        s = md_img.replace_all(&s, |c: &regex::Captures| {
+            let idx = embeds.len();
+            embeds.push(c[2].trim().to_string());
+            let alt = if c[1].is_empty() { "image" } else { &c[1] };
+            format!("<a class=\"attachment-card\" data-attachment=\"__EMBED_{}__\"><i class=\"ph ph-image\"></i> {}</a>", idx, alt)
+        }).to_string();
+        // Wikilinks -> internal anchor (resolved to a graph edge later).
+        s = wl.replace_all(&s, |c: &regex::Captures| {
+            let raw = c[1].to_string();
+            let parts: Vec<&str> = raw.splitn(2, '|').collect();
+            let target = parts[0].trim();
+            let label = parts.get(1).map(|x| x.trim()).unwrap_or(target);
+            wikilinks.push(target.to_string());
+            format!("<a class=\"wikilink\" data-wikilink=\"{}\">{}</a>", escape_html(target), escape_html(label))
+        }).to_string();
+        // Standard markdown links.
+        s = md_link.replace_all(&s, |c: &regex::Captures| {
+            format!("<a href=\"{}\">{}</a>", escape_html(c[2].trim()), c[1].to_string())
+        }).to_string();
+        s = bold.replace_all(&s, "<b>$1</b>").to_string();
+        s = italic.replace_all(&s, "<i>$1</i>").to_string();
+        s = code.replace_all(&s, "<code>$1</code>").to_string();
+        s = hashtag.replace_all(&s, "$1<span class=\"tag\">#$2</span>").to_string();
+        s
+    };
+
+    let mut html = String::new();
+    let mut in_code = false;
+    for raw_line in body.lines() {
+        let line = raw_line.trim_end();
+        if line.trim_start().starts_with("```") {
+            if in_code { html.push_str("</code></pre>"); in_code = false; }
+            else { let lang = line.trim_start().trim_start_matches('`'); html.push_str(&format!("<pre><code class=\"language-{}\">", escape_html(lang.trim()))); in_code = true; }
+            continue;
+        }
+        if in_code { html.push_str(&escape_html(raw_line)); html.push('\n'); continue; }
+
+        let t = line.trim();
+        if t.is_empty() { html.push_str("<p></p>"); continue; }
+        if let Some(r) = t.strip_prefix("### ") { html.push_str(&format!("<h3>{}</h3>", inline(r, wikilinks, embeds))); }
+        else if let Some(r) = t.strip_prefix("## ") { html.push_str(&format!("<h2>{}</h2>", inline(r, wikilinks, embeds))); }
+        else if let Some(r) = t.strip_prefix("# ") { html.push_str(&format!("<h1>{}</h1>", inline(r, wikilinks, embeds))); }
+        else if let Some(r) = t.strip_prefix("> ") { html.push_str(&format!("<blockquote>{}</blockquote>", inline(r, wikilinks, embeds))); }
+        else if let Some(r) = t.strip_prefix("- [ ] ").or_else(|| t.strip_prefix("* [ ] ")) {
+            html.push_str(&format!("<ul data-type=\"taskList\"><li data-checked=\"false\"><label><input type=\"checkbox\"></label><div>{}</div></li></ul>", inline(r, wikilinks, embeds)));
+        }
+        else if let Some(r) = t.strip_prefix("- [x] ").or_else(|| t.strip_prefix("* [x] ")) {
+            html.push_str(&format!("<ul data-type=\"taskList\"><li data-checked=\"true\"><label><input type=\"checkbox\" checked></label><div>{}</div></li></ul>", inline(r, wikilinks, embeds)));
+        }
+        else if let Some(r) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) { html.push_str(&format!("<ul><li>{}</li></ul>", inline(r, wikilinks, embeds))); }
+        else { html.push_str(&format!("<p>{}</p>", inline(t, wikilinks, embeds))); }
+    }
+    if in_code { html.push_str("</code></pre>"); }
+    html.replace("</ul><ul>", "").replace("</ul data-type=\"taskList\"><ul data-type=\"taskList\">", "")
+}
+
+#[tauri::command]
+pub async fn import_obsidian_vault(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    workspace_id: String,
+    folder: String,
+) -> Result<ObsidianImportResult, String> {
+    let dir = Path::new(&folder);
+    if !dir.exists() || !dir.is_dir() {
+        return Err("That folder does not exist.".into());
+    }
+    // All markdown notes.
+    let mut md_files: Vec<PathBuf> = Vec::new();
+    collect_note_files(dir, 0, &mut md_files);
+    md_files.retain(|p| {
+        let e = p.extension().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        e == "md" || e == "markdown"
+    });
+    if md_files.is_empty() {
+        return Err("No .md notes found in that vault.".into());
+    }
+    // Index every non-markdown file by lowercase filename for attachment/embed resolution.
+    let mut all_files: Vec<PathBuf> = Vec::new();
+    collect_all_files(dir, 0, &mut all_files);
+    let mut attach_index: HashMap<String, PathBuf> = HashMap::new();
+    for f in &all_files {
+        if let Some(name) = f.file_name() {
+            attach_index.entry(name.to_string_lossy().to_lowercase()).or_insert_with(|| f.clone());
+        }
+    }
+
+    let notes_dir = get_loom_notes_dir(&app_handle)?;
+    let files_dir = get_loom_files_dir(&app_handle)?;
+
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+
+    let mut result = ObsidianImportResult::default();
+    // basename/title/alias (lowercased) -> note item id, for wikilink resolution.
+    let mut resolver: HashMap<String, String> = HashMap::new();
+    // (note_id, [wikilink targets]) collected in pass 1, wired in pass 2.
+    let mut pending_links: Vec<(String, Vec<String>)> = Vec::new();
+
+    for path in &md_files {
+        let content = match fs::read_to_string(path) { Ok(c) => c, Err(_) => { result.skipped += 1; continue; } };
+        let (fm, body) = parse_frontmatter(&content);
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let title = fm.get("title").and_then(|v| v.first()).cloned().unwrap_or_else(|| stem.clone());
+
+        let mut wikilinks: Vec<String> = Vec::new();
+        let mut embeds: Vec<String> = Vec::new();
+        let mut html = obsidian_md_to_html(&body, &mut wikilinks, &mut embeds);
+
+        // Copy + register each embed, then point the placeholder at the real path.
+        for (i, name) in embeds.iter().enumerate() {
+            let key = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
+            let placeholder = format!("__EMBED_{}__", i);
+            if let Some(src) = attach_index.get(&key) {
+                let dest = generate_unique_path(files_dir.join(src.file_name().unwrap_or_default()));
+                if fs::copy(src, &dest).is_ok() {
+                    let dest_str = dest.to_string_lossy().to_string();
+                    let fname = dest.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let ext = dest.extension().map(|s| s.to_string_lossy().to_lowercase());
+                    let mime = ext.as_deref().map(guess_mime_type);
+                    let (size, modified) = extract_metadata(&dest);
+                    let _ = create_file_entry_impl(&conn, workspace_id.clone(), fname.clone(), dest_str.clone(), fname.clone(), ext, mime, size, modified);
+                    html = html.replace(&placeholder, &escape_html(&dest_str));
+                    result.attachments += 1;
+                    continue;
+                }
+            }
+            // Unresolved embed: drop the dead link target but keep the visible name.
+            html = html.replace(&format!("data-attachment=\"{}\"", placeholder), "");
+        }
+
+        // Tags: frontmatter `tags` + inline #hashtags (deduped).
+        let mut tags: Vec<String> = fm.get("tags").cloned().unwrap_or_default();
+        let hashtag = regex::Regex::new(r"(?:^|\s)#([A-Za-z0-9_][A-Za-z0-9_/-]*)").unwrap();
+        for c in hashtag.captures_iter(&body) {
+            let t = c[1].to_string();
+            if !tags.iter().any(|x| x.eq_ignore_ascii_case(&t)) { tags.push(t); }
+        }
+        let aliases: Vec<String> = fm.get("aliases").cloned().unwrap_or_default();
+
+        // Plain-text + preview for search/list.
+        let tag_re = regex::Regex::new(r"(?is)<[^>]+>").unwrap();
+        let plain = tag_re.replace_all(&html, " ").replace("&nbsp;", " ");
+        let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+        let words = plain.split_whitespace().count();
+        let preview: String = plain.chars().take(140).collect();
+        let first_tag = tags.first().cloned().unwrap_or_default();
+
+        let meta = serde_json::json!({
+            "folder": "Obsidian",
+            "words": words,
+            "preview": preview,
+            "full_text": plain.chars().take(20_000).collect::<String>(),
+            "tag": first_tag,
+            "tags": tags,
+            "aliases": aliases,
+            "source": "obsidian",
+        });
+        let meta_str = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".into());
+
+        // Write the note file and register the item.
+        let sanitized = sanitize_filename(&title);
+        let dest = generate_unique_path(notes_dir.join(format!("{}.html", sanitized)));
+        let final_filename = dest.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let final_title = dest.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let document = format!("<h1>{}</h1>{}", escape_html(&final_title), html);
+        if fs::write(&dest, document.as_bytes()).is_err() { result.skipped += 1; continue; }
+        let path_str = dest.to_string_lossy().to_string();
+        let (size, modified) = extract_metadata(&dest);
+
+        let note_id: Result<String, String> = (|| {
+            let id = conn.query_row(
+                "INSERT INTO items (id, workspace_id, title, item_type, metadata, tag) VALUES (lower(hex(randomblob(16))), ?, ?, 'note', ?, ?) RETURNING id",
+                rusqlite::params![workspace_id, final_title, meta_str, first_tag],
+                |row| row.get::<_, String>(0),
+            ).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO files (id, path, filename, extension, mime_type, size_bytes, created_at, modified_at, favorite, tags)
+                 VALUES (?, ?, ?, 'html', 'text/html', ?, strftime('%s','now'), ?, 0, ?)",
+                rusqlite::params![id, path_str, final_filename, size, modified, tags.join(",")],
+            ).map_err(|e| e.to_string())?;
+            Ok(id)
+        })();
+
+        let note_id = match note_id { Ok(id) => id, Err(_) => { let _ = fs::remove_file(&dest); result.skipped += 1; continue; } };
+        result.imported += 1;
+
+        // Register every name this note can be linked by.
+        resolver.entry(stem.to_lowercase()).or_insert_with(|| note_id.clone());
+        resolver.entry(final_title.to_lowercase()).or_insert_with(|| note_id.clone());
+        for a in &aliases { resolver.entry(a.to_lowercase()).or_insert_with(|| note_id.clone()); }
+        pending_links.push((note_id, wikilinks));
+    }
+
+    // Pass 2: wire resolved wikilinks into real graph edges.
+    for (source_id, targets) in &pending_links {
+        for t in targets {
+            if let Some(target_id) = resolver.get(&wikilink_key(t)) {
+                if target_id != source_id {
+                    if create_link_impl(&conn, source_id.clone(), target_id.clone(), "wikilink".into()).is_ok() {
+                        result.links_created += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(result)
+
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+// Like collect_note_files but every file (used to index attachments).
+fn collect_all_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+    if depth > 8 { return; }
+    let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if name.starts_with('.') { continue; }
+            collect_all_files(&path, depth + 1, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}
+
 // ── Maintenance: custom CSS folder + database optimization ──
 fn get_custom_css_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -1301,10 +1636,32 @@ pub async fn fs_decrypt_file(state: State<'_, AppState>, id: String, password: S
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
+// These two commands back the "Export / Save As" features: `dest` comes from a user
+// `save()` dialog and is meant to land anywhere in the user's space (Desktop, Documents,
+// another drive). So we can't confine to app_data — instead we block writes into OS/system
+// roots, which is the only path an injected script would target for persistence/RCE.
+// ponytail: blocklist of system roots, not an allowlist — broaden the list if a new
+// sensitive root shows up. The CSP (script-src 'self') is the primary guard; this is depth.
+fn reject_system_path(dest: &Path) -> Result<(), String> {
+    let abs = if dest.is_absolute() { dest.to_path_buf() } else {
+        std::env::current_dir().map_err(|e| e.to_string())?.join(dest)
+    };
+    let lower = abs.to_string_lossy().to_lowercase().replace('\\', "/");
+    const BLOCKED: &[&str] = &[
+        "c:/windows", "c:/program files", "c:/program files (x86)",
+        "/etc/", "/bin/", "/sbin/", "/usr/", "/boot/", "/sys/", "/lib",
+    ];
+    if BLOCKED.iter().any(|b| lower.starts_with(b) || lower == b.trim_end_matches('/')) {
+        return Err("Refusing to write to a system directory.".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn fs_copy_file(src: String, dest: String) -> Result<(), String> {
     let src_path = Path::new(&src);
     let dest_path = Path::new(&dest);
+    reject_system_path(dest_path)?;
     if !src_path.exists() {
         return Err("Source file does not exist".into());
     }
@@ -1313,7 +1670,9 @@ pub async fn fs_copy_file(src: String, dest: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn fs_write_any_file(path: String, content: String) -> Result<(), String> {
-    fs::write(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())
+    let dest = Path::new(&path);
+    reject_system_path(dest)?;
+    fs::write(dest, content.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize, Debug)]
@@ -1425,6 +1784,40 @@ pub async fn run_integrity_sweep(state: State<'_, AppState>, app_handle: tauri::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontmatter_parses_scalars_and_lists() {
+        let src = "---\ntitle: My Note\ntags: [a, b]\naliases:\n  - alt one\n  - alt two\n---\nBody line\n";
+        let (fm, body) = parse_frontmatter(src);
+        assert_eq!(fm.get("title").unwrap(), &vec!["My Note".to_string()]);
+        assert_eq!(fm.get("tags").unwrap(), &vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(fm.get("aliases").unwrap(), &vec!["alt one".to_string(), "alt two".to_string()]);
+        assert_eq!(body.trim(), "Body line");
+    }
+
+    #[test]
+    fn no_frontmatter_returns_content_unchanged() {
+        let (fm, body) = parse_frontmatter("# Heading\ntext");
+        assert!(fm.is_empty());
+        assert_eq!(body, "# Heading\ntext");
+    }
+
+    #[test]
+    fn wikilink_key_strips_heading_alias_and_path() {
+        assert_eq!(wikilink_key("Folder/Note#Section|Label"), "note");
+        assert_eq!(wikilink_key("Simple"), "simple");
+    }
+
+    #[test]
+    fn md_converter_collects_wikilinks_and_embeds() {
+        let mut wl = Vec::new();
+        let mut em = Vec::new();
+        let html = obsidian_md_to_html("See [[Other Note]] and ![[pic.png]] #idea", &mut wl, &mut em);
+        assert_eq!(wl, vec!["Other Note".to_string()]);
+        assert_eq!(em, vec!["pic.png".to_string()]);
+        assert!(html.contains("data-wikilink=\"Other Note\""));
+        assert!(html.contains("class=\"tag\">#idea"));
+    }
 
     fn test_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

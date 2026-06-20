@@ -379,7 +379,9 @@ input, textarea { font-family: inherit; color: inherit; }
 .tb-title { font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0.12em; }
 .tb-sep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; }
 .tb-crumb { font-size: var(--fs-sm); color: var(--text-faint); display: flex; align-items: center; gap: 6px; }
-.tb-drag { flex: 1; display: flex; justify-content: center; align-items: center; }
+/* min-width:0 lets this flex child shrink below its content width so the pill row's
+   own overflow-x scroll engages instead of pushing .tb-actions off the viewport. */
+.tb-drag { flex: 1; min-width: 0; display: flex; justify-content: center; align-items: center; }
 
 .tb-search {
   align-self: center;
@@ -403,7 +405,9 @@ input, textarea { font-family: inherit; color: inherit; }
   color: var(--text-faint); line-height: 1.4;
 }
 
-.tb-actions { display: flex; align-items: center; gap: 2px; padding: 0 6px; }
+/* flex:0 0 auto keeps the action cluster (search, undo/redo, theme, settings, sidebar)
+   at its natural width and always on-screen, never squeezed by the nav. */
+.tb-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; padding: 0 6px; }
 .tb-iconbtn {
   width: 30px; height: 28px; border-radius: var(--r-sm);
   display: grid; place-items: center; color: var(--text-faint);
@@ -1249,16 +1253,32 @@ textarea:focus-visible,
   word-break: break-word;
   overflow-wrap: break-word;
 }
-.note-editor-body[contenteditable="true"] {
+.note-editor-body[contenteditable="true"], .ProseMirror.note-editor-body {
   cursor: text;
 }
-/* Large, legible placeholder for an empty editor (native contentEditable has none). */
-.note-editor-body[contenteditable="true"]:empty::before {
+.ProseMirror.note-editor-body:focus { outline: none; }
+/* TipTap Placeholder: shown on the first empty paragraph. */
+.ProseMirror.note-editor-body p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   color: var(--text-ghost);
   font-size: var(--fs-xl);
+  float: left;
+  height: 0;
   pointer-events: none;
 }
+/* Toolbar separators + active state */
+.note-editor-toolbar .tb-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.note-editor-toolbar button.active {
+  background: var(--accent-soft, color-mix(in oklch, var(--accent) 18%, transparent));
+  color: var(--text);
+  border-color: var(--accent-line, var(--accent));
+}
+/* TaskList checkboxes (replaces legacy raw <input> todos) */
+.ProseMirror.note-editor-body ul[data-type="taskList"] { list-style: none; margin-left: 4px; padding: 0; }
+.ProseMirror.note-editor-body ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0; }
+.ProseMirror.note-editor-body ul[data-type="taskList"] li > label { margin-top: 4px; user-select: none; }
+.ProseMirror.note-editor-body ul[data-type="taskList"] li > div { flex: 1; }
+.ProseMirror.note-editor-body ul[data-type="taskList"] input[type="checkbox"] { accent-color: var(--accent); }
 /* Frame embedded media/blocks so rich content stays inside the writing surface. */
 .note-editor-body img {
   max-width: 100%;
@@ -1333,6 +1353,45 @@ textarea:focus-visible,
   margin: 6px 0;
   transition: background var(--dur-fast);
 }
+/* Obsidian wikilinks (rendered by the vault importer) */
+.note-editor-body .wikilink, .ProseMirror.note-editor-body .wikilink {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--accent-line, var(--accent));
+  cursor: pointer;
+}
+/* ---- Rich media embeds (pdf / audio / video / web) ---- */
+.media-embed {
+  display: block;
+  width: 100%;
+  margin: 16px 0;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.media-embed.media-pdf, .media-embed.media-web { height: 480px; }
+.media-embed.media-video { max-height: 70vh; background: #000; }
+.media-embed.media-audio { height: 44px; border-radius: var(--r-pill, 22px); }
+/* selected embed in the editor */
+.ProseMirror.note-editor-body .ProseMirror-selectednode.media-embed {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.media-menu-item {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: var(--fs-sm);
+}
+.media-menu-item:hover { background: var(--surface-3); }
 [data-theme="light"] .tb-search-exp {
   background: var(--surface-1);
 }
@@ -1808,18 +1867,25 @@ html { scroll-behavior: smooth; }
 /* Titlebar Pill Navigation */
 .tb-top-nav {
   flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
 }
 
+/* Stays shrink-to-content (so it's centered by the parent) until it hits the parent
+   width, then caps at 100% and scrolls its own pills horizontally — the start of the
+   list is always reachable, and the action cluster never gets pushed off-screen. */
 .tb-top-nav-inner {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 0 12px;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }

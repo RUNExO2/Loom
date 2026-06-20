@@ -63,7 +63,7 @@ pub async fn save_dashboard_layout(
     workspace_id: String,
     widgets: Vec<DashboardWidget>,
 ) -> Result<(), String> {
-    state.db.call(move |mut conn| {
+    state.db.call(move |conn| {
         let res = (|| -> Result<_, String> {
 
     

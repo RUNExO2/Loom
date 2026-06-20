@@ -5,6 +5,18 @@ use rusqlite::{Connection, Result};
 // imported/restored DB can be checked for compatibility.
 pub const SCHEMA_VERSION: i64 = 2;
 
+// Idempotent "ADD COLUMN" that swallows ONLY the benign "column already exists" case
+// and propagates everything else (locked DB, disk error, syntax) instead of `let _ =`
+// silently dropping it. That's the difference between a clean re-run and silent schema
+// drift the Database audit flagged.
+fn add_column(conn: &Connection, sql: &str) -> Result<()> {
+    match conn.execute(sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn setup_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -261,26 +273,23 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
     }
 
     // Soft-migration: per-widget config payload (e.g. Custom Widget HTML).
-    let _ = conn.execute("ALTER TABLE dashboard_widgets ADD COLUMN config TEXT", []);
+    add_column(conn, "ALTER TABLE dashboard_widgets ADD COLUMN config TEXT")?;
 
     // Soft-migration: run-level progress index for crash-consistency tracking.
-    let _ = conn.execute(
-        "ALTER TABLE automation_executions ADD COLUMN last_completed_index INTEGER DEFAULT -1",
-        [],
-    );
+    add_column(conn, "ALTER TABLE automation_executions ADD COLUMN last_completed_index INTEGER DEFAULT -1")?;
 
     // Soft-migration: Add columns to existing DB if they are missing
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN user_pinned BOOLEAN DEFAULT 0", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN user_size_preference TEXT", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN metadata TEXT DEFAULT '{}'", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN deleted BOOLEAN DEFAULT 0", []);
+    add_column(conn, "ALTER TABLE items ADD COLUMN user_pinned BOOLEAN DEFAULT 0")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN user_size_preference TEXT")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN metadata TEXT DEFAULT '{}'")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN deleted BOOLEAN DEFAULT 0")?;
 
     // Soft-migration: Promote JSON fields
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN status TEXT", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN priority TEXT", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN due TEXT", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN progress INTEGER", []);
-    let _ = conn.execute("ALTER TABLE items ADD COLUMN tag TEXT", []);
+    add_column(conn, "ALTER TABLE items ADD COLUMN status TEXT")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN priority TEXT")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN due TEXT")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN progress INTEGER")?;
+    add_column(conn, "ALTER TABLE items ADD COLUMN tag TEXT")?;
 
     // Promoted-column indexes. MUST run AFTER the ADD COLUMN soft-migrations above:
     // on a pre-existing DB the columns don't exist until the ALTERs land, so creating
@@ -289,6 +298,12 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_priority ON items(priority)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due ON items(due)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_tag ON items(tag)", []);
+    // Partial index over only LIVE items: every feed/list query filters `deleted = 0`, so
+    // as the trash grows a full index keeps paying for dead rows. WHERE-clause index skips
+    // them. MUST be here (after the `deleted` ADD COLUMN above) for the same reason.
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_active_items ON items(workspace_id, item_type) WHERE deleted = 0", []);
+    // Startup ledger sweep + staged-transaction reconciliation both filter by status.
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_status ON mutation_ledger(status)", []);
 
     // Soft-migration: Create the dashboard_widgets table in existing DBs
     let _ = conn.execute(
@@ -351,6 +366,41 @@ pub fn init_db(path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
+// Open the DB, surviving an unreadable file. On genuine corruption (SQLITE_CORRUPT /
+// SQLITE_NOTADB) the bad file + its WAL/SHM are renamed aside (kept for forensic/manual
+// recovery, never deleted) and a fresh DB is initialized — so a power-loss corruption can
+// no longer lock the user out forever. Lock/busy/IO errors are NOT quarantined (the data
+// is fine, the file is just unavailable): they propagate so the caller can warn and exit.
+// ponytail: auto-quarantine fixes the permanent-lockout risk without a recovery-window UI;
+// add the snapshot-restore window if users need to recover the bad file in-app.
+pub fn init_db_or_recover(path: &str) -> std::result::Result<Connection, String> {
+    match init_db(path) {
+        Ok(c) => Ok(c),
+        Err(e) => {
+            let corrupt = matches!(
+                &e,
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::DatabaseCorrupt
+                        || f.code == rusqlite::ErrorCode::NotADatabase
+            );
+            if !corrupt {
+                return Err(e.to_string());
+            }
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let quarantine = format!("{}.corrupt.{}", path, ts);
+            std::fs::rename(path, &quarantine)
+                .map_err(|re| format!("Database corrupt and could not be quarantined: {} ({})", e, re))?;
+            let _ = std::fs::rename(format!("{}-wal", path), format!("{}-wal.corrupt.{}", path, ts));
+            let _ = std::fs::rename(format!("{}-shm", path), format!("{}-shm.corrupt.{}", path, ts));
+            eprintln!("Database was corrupt; quarantined to {} and started fresh.", quarantine);
+            init_db(path).map_err(|e2| e2.to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +460,28 @@ mod tests {
         conn.execute("UPDATE items SET metadata = ?1 WHERE id = 'f1'",
             [r#"{"full_text":"notes about photosynthesis"}"#]).unwrap();
         assert_eq!(search(&conn, "photosynthesis"), vec!["f1"]);
+    }
+
+    #[test]
+    fn corrupt_db_is_quarantined_and_reopens_fresh() {
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("loom_corrupt_{}.db", ts));
+        let p = path.to_string_lossy().to_string();
+        std::fs::write(&path, b"this is not a sqlite database at all").unwrap();
+        // Must not error out: the junk file is quarantined and a usable DB is returned.
+        let conn = init_db_or_recover(&p).unwrap();
+        conn.execute("INSERT INTO workspaces (id, name) VALUES ('w','W')", []).unwrap();
+        // A quarantine copy of the bad file was kept (not deleted).
+        let dir = path.parent().unwrap();
+        let stem = path.file_name().unwrap().to_string_lossy().to_string();
+        let kept = std::fs::read_dir(dir).unwrap().flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.corrupt.", stem)));
+        assert!(kept, "corrupt file should be quarantined, not lost");
+        drop(conn);
+        // cleanup
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            if e.file_name().to_string_lossy().starts_with(&stem) { let _ = std::fs::remove_file(e.path()); }
+        }
     }
 
     #[test]

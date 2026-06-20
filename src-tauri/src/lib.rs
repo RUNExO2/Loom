@@ -1,6 +1,7 @@
 pub mod database;
 mod commands;
 mod automation;
+mod archive;
 mod export;
 mod projections;
 mod fs_commands;
@@ -9,8 +10,7 @@ mod dashboard_commands;
 mod library_commands;
 mod content_commands;
 mod crypto_commands;
-use database::init_db;
-use std::sync::Mutex;
+mod vault_hello;
 use tauri::{Emitter, Manager};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,22 +26,39 @@ pub struct AppState {
     pub app_handle: tauri::AppHandle,
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data directory");
-            
+
+            // Apply a staged .loom restore BEFORE the DB opens (loom.db not yet locked).
+            match archive::apply_pending_restore(&app_data_dir) {
+                Ok(true) => println!("Restored workspace from staged .loom archive."),
+                Ok(false) => {}
+                Err(e) => println!("WARNING: workspace restore failed: {}", e),
+            }
+
             let db_path = app_data_dir.join("loom.db");
             let db_path_str = db_path.to_string_lossy().into_owned();
-            let mut conn = init_db(&db_path_str).expect("Failed to initialize database");
+            // Corruption self-heals (file quarantined, fresh DB). A non-recoverable open
+            // error (locked by another instance, disk/permission) shows a diagnostic and
+            // exits cleanly instead of a silent `expect()` panic with no popup.
+            let mut conn = match database::init_db_or_recover(&db_path_str) {
+                Ok(c) => c,
+                Err(e) => {
+                    use tauri_plugin_dialog::DialogExt;
+                    app.dialog()
+                        .message(format!(
+                            "Loom could not open its database.\n\n{}\n\nYour data has not been changed. Close any other running copy of Loom and try again. A pre-migration backup may exist next to:\n{}",
+                            e, db_path_str
+                        ))
+                        .title("Loom — Database Error")
+                        .blocking_show();
+                    std::process::exit(1);
+                }
+            };
             
             // Run global integrity check on startup
             if let Ok(integrity) = commands::verify_integrity_all(&conn) {
@@ -73,7 +90,15 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => println!("WARNING: pending FS op recovery failed: {}", e),
             }
-            
+
+            // Reconcile mutation_ledger: STAGED rows left by a crash become FAILED (the
+            // transaction already rolled back), then cap the log so it can't grow forever.
+            match commands::sweep_stale_ledger(&conn) {
+                Ok((r, p)) if r + p > 0 => println!("Ledger sweep: {} staged->failed, {} pruned", r, p),
+                Ok(_) => {}
+                Err(e) => println!("WARNING: ledger sweep failed: {}", e),
+            }
+
             drop(conn);
             let t_db = tauri::async_runtime::block_on(async {
                 tokio_rusqlite::Connection::open(&db_path_str).await.expect("Failed to open async db")
@@ -119,7 +144,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
             export::export_data,
             export::backup_database,
             export::import_data,
@@ -185,6 +209,14 @@ pub fn run() {
             fs_commands::fs_decrypt_file,
             fs_commands::index_text_files,
             fs_commands::import_notes_from_folder,
+            fs_commands::import_obsidian_vault,
+            archive::export_workspace_archive,
+            archive::import_workspace_archive,
+            vault_hello::hello_available,
+            vault_hello::hello_enrolled,
+            vault_hello::hello_enable,
+            vault_hello::hello_disable,
+            vault_hello::hello_unlock,
             fs_commands::reveal_custom_css_folder,
             fs_commands::get_custom_css,
             fs_commands::optimize_database,

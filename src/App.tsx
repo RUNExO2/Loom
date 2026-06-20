@@ -17,10 +17,9 @@ import {
   getBackgroundConfig, applyBackgroundConfig,
 } from "./lib/settings";
 import { trackItemOpened } from "./lib/viewMemory";
-import { getCustomThemeState, applyCustomTheme, activeTheme } from "./lib/theme";
+import { getCustomThemeState, applyCustomTheme, activeTheme, reloadCustomCss } from "./lib/theme";
 import { ConnectionsPanel, Toasts, ShortcutsOverlay } from "./components/shared";
 import { fsImportNoteFile, fsImportFile } from "./ipc/fs";
-import { getCustomCss } from "./ipc/content";
 import { Dashboard } from "./components/Dashboard";
 import { NotesModule, TimelineModule, LibraryModule, VaultModule, AutomationModule } from "./components/Modules";
 import { TasksModule, ProjectsModule, HabitsModule, CalendarModule, BookmarksModule, FilesModule } from "./components/Modules2";
@@ -150,14 +149,12 @@ export function App() {
     });
     // Apply the saved custom theme (design-token overrides) on launch, if enabled.
     getCustomThemeState().then((st) => applyCustomTheme(activeTheme(st), st.enabled));
-    // Inject any user CSS from the Custom CSS folder.
-    getCustomCss().then((css) => {
-      if (!css) return;
-      let el = document.getElementById("loom-custom-css") as HTMLStyleElement | null;
-      if (!el) { el = document.createElement("style"); el.id = "loom-custom-css"; document.head.appendChild(el); }
-      el.textContent = css;
-    }).catch(() => {});
-    
+    // Inject user CSS from the Custom CSS folder, and live-reload it whenever the window
+    // regains focus so external edits show up without a restart.
+    reloadCustomCss();
+    const onFocus = () => { reloadCustomCss(); };
+    window.addEventListener("focus", onFocus);
+
     // Global Parallax listener
     const onMove = (e: MouseEvent) => {
       if (document.documentElement.dataset.parallax !== "on") return;
@@ -168,8 +165,11 @@ export function App() {
       document.documentElement.style.setProperty("--bg-py", `${y}px`);
     };
     window.addEventListener("mousemove", onMove, { passive: true });
-    
-    return () => window.removeEventListener("mousemove", onMove);
+
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("focus", onFocus);
+    };
   }, []);
 
   // Resolve + apply theme; persist the preference; track the OS scheme when "system".

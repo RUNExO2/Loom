@@ -10,9 +10,12 @@ import {
 } from "../lib/settings";
 import { useItemStore } from "../lib/itemStore";
 import { defaultDashboardLayout } from "./Dashboard";
-import { optimizeDatabase, importNotesFromFolder } from "../ipc/content";
-import { open } from "@tauri-apps/plugin-dialog";
+import { optimizeDatabase, importNotesFromFolder, importObsidianVault, revealCustomCssFolder } from "../ipc/content";
+import { reloadCustomCss } from "../lib/theme";
+import { WORKSPACE_TEMPLATES, applyWorkspaceTemplate } from "../lib/templates";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { exportData, backupDatabase, importData, clearAllUserData } from "../ipc/settings";
+import { exportWorkspaceArchive, importWorkspaceArchive } from "../ipc/workspaces";
 import { useModal } from "./Modal";
 import { mutationEngine } from "../lib/mutationEngine";
 import { Button } from "./ui/Button";
@@ -101,6 +104,70 @@ export function SettingsModule() {
     } catch (e) {
       console.error("Import failed:", e);
       modal.confirm({ title: `${label} import failed`, message: String(e), icon: "ph-warning", danger: true, confirmLabel: "OK" });
+    } finally { setBusy(null); }
+  };
+
+  const onImportObsidian = async () => {
+    if (!workspaceId) return;
+    const dir = await open({ directory: true, multiple: false, title: "Select Obsidian vault folder" });
+    if (!dir || Array.isArray(dir)) return;
+    setBusy("import");
+    try {
+      const res = await importObsidianVault(workspaceId, dir);
+      await refresh();
+      toast(`Imported ${res.imported} note(s) · ${res.links_created} wikilinks · ${res.attachments} attachments${res.skipped ? ` · ${res.skipped} skipped` : ""}`, "ph-brain");
+    } catch (e) {
+      console.error("Obsidian import failed:", e);
+      modal.confirm({ title: "Obsidian import failed", message: String(e), icon: "ph-warning", danger: true, confirmLabel: "OK" });
+    } finally { setBusy(null); }
+  };
+
+  const onExportArchive = async () => {
+    const dest = await save({ title: "Export workspace", defaultPath: "workspace.loom", filters: [{ name: "Loom Workspace", extensions: ["loom"] }] });
+    if (!dest) return;
+    setBusy("archive");
+    try {
+      const count = await exportWorkspaceArchive(dest);
+      toast(`Workspace exported · ${count} files packaged`, "ph-package");
+    } catch (e) {
+      console.error("Export archive failed:", e);
+      modal.confirm({ title: "Export failed", message: String(e), icon: "ph-warning", danger: true, confirmLabel: "OK" });
+    } finally { setBusy(null); }
+  };
+
+  const onRestoreArchive = async () => {
+    const src = await open({ multiple: false, title: "Restore workspace", filters: [{ name: "Loom Workspace", extensions: ["loom"] }] });
+    if (!src || Array.isArray(src)) return;
+    const ok = await modal.confirm({
+      title: "Restore workspace?",
+      message: "This replaces your current workspace (notes, files, settings, themes) with the archive's contents. Your current database is backed up to loom.db.pre-restore. The restore is applied when you next restart Loom.",
+      icon: "ph-package", danger: true, confirmLabel: "Stage restore",
+    });
+    if (!ok) return;
+    setBusy("archive");
+    try {
+      await importWorkspaceArchive(src);
+      modal.confirm({ title: "Restore staged", message: "Quit and reopen Loom to complete the restore.", icon: "ph-check-circle", confirmLabel: "OK" });
+    } catch (e) {
+      console.error("Restore archive failed:", e);
+      modal.confirm({ title: "Restore failed", message: String(e), icon: "ph-warning", danger: true, confirmLabel: "OK" });
+    } finally { setBusy(null); }
+  };
+
+  const onApplyTemplate = async (tplId: string) => {
+    if (!workspaceId) return;
+    const tpl = WORKSPACE_TEMPLATES.find((t) => t.id === tplId);
+    if (!tpl) return;
+    const ok = await modal.confirm({ title: `Apply “${tpl.name}” template`, message: `Add ${tpl.notes.length} starter notes to this workspace?`, icon: tpl.icon, confirmLabel: "Add notes" });
+    if (!ok) return;
+    setBusy("template");
+    try {
+      const n = await applyWorkspaceTemplate(workspaceId, tpl);
+      await refresh();
+      toast(`Added ${n} notes from ${tpl.name}`, tpl.icon);
+    } catch (e) {
+      console.error("Template apply failed:", e);
+      modal.confirm({ title: "Template failed", message: String(e), icon: "ph-warning", danger: true, confirmLabel: "OK" });
     } finally { setBusy(null); }
   };
 
@@ -350,6 +417,17 @@ export function SettingsModule() {
             </div>
             <Button iconLeft="ph-paint-brush-broad" onClick={() => setThemeStudio(true)}>Open Theme Studio</Button>
           </div>
+          <div className="divider"></div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Custom CSS</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Drop .css files in the Custom CSS folder. They reload automatically when Loom regains focus, or reload now.</div>
+            </div>
+            <div className="row gap6">
+              <Button iconLeft="ph-folder-open" onClick={() => revealCustomCssFolder().catch(console.error)}>Open folder</Button>
+              <Button iconLeft="ph-arrows-clockwise" onClick={async () => { await reloadCustomCss(); toast("Custom CSS reloaded", "ph-arrows-clockwise"); }}>Reload CSS</Button>
+            </div>
+          </div>
         </div>
       </Section>
 
@@ -408,8 +486,31 @@ export function SettingsModule() {
               <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Robust migration tools to pull data from external tools.</div>
             </div>
             <div className="row gap6">
-               <Button iconLeft="ph-file-arrow-down" loading={busy === "import"} onClick={() => onImportFolder("Obsidian")}>Obsidian</Button>
+               <Button iconLeft="ph-brain" loading={busy === "import"} onClick={onImportObsidian}>Obsidian Vault</Button>
                <Button iconLeft="ph-file-arrow-down" loading={busy === "import"} onClick={() => onImportFolder("Notion")}>Notion</Button>
+            </div>
+          </div>
+          <div className="divider"></div>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Workspace Templates</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Seed this workspace with a ready-made set of starter notes.</div>
+            </div>
+            <div className="row gap6" style={{ flexWrap: "wrap", justifyContent: "flex-end", maxWidth: 360 }}>
+              {WORKSPACE_TEMPLATES.map((t) => (
+                <Button key={t.id} iconLeft={t.icon} loading={busy === "template"} onClick={() => onApplyTemplate(t.id)}>{t.name}</Button>
+              ))}
+            </div>
+          </div>
+          <div className="divider"></div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Workspace Portability (.loom)</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Package your entire workspace — database, settings, themes, notes & attachments — into one portable archive, or restore from one.</div>
+            </div>
+            <div className="row gap6">
+               <Button iconLeft="ph-package" loading={busy === "archive"} onClick={onExportArchive}>Export .loom</Button>
+               <Button iconLeft="ph-arrow-counter-clockwise" loading={busy === "archive"} onClick={onRestoreArchive}>Restore</Button>
             </div>
           </div>
           <div className="divider"></div>

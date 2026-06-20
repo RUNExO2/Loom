@@ -44,9 +44,23 @@ export interface ImportFolderResult { imported: number; skipped: number; }
 export const importNotesFromFolder = (workspaceId: string, folder: string) =>
   apiInvoke<ImportFolderResult>("import_notes_from_folder", { workspaceId, folder });
 
+export interface ObsidianImportResult { imported: number; skipped: number; links_created: number; attachments: number; }
+
+// Advanced Obsidian vault import: frontmatter, #hashtags, [[wikilinks]] (as graph edges),
+// ![[embeds]]/attachments (copied + registered), and metadata extraction.
+export const importObsidianVault = (workspaceId: string, folder: string) =>
+  apiInvoke<ObsidianImportResult>("import_obsidian_vault", { workspaceId, folder });
+
 // Custom CSS folder: reveal it, and load concatenated .css for injection at launch.
 export const revealCustomCssFolder = () => apiInvoke<void>("reveal_custom_css_folder");
 export const getCustomCss = () => apiInvoke<string>("get_custom_css");
+
+// Windows Hello vault unlock (biometric / PIN via DPAPI-protected master password).
+export const helloAvailable = () => apiInvoke<boolean>("hello_available");
+export const helloEnrolled = () => apiInvoke<boolean>("hello_enrolled");
+export const helloEnable = (secret: string) => apiInvoke<void>("hello_enable", { secret });
+export const helloDisable = () => apiInvoke<void>("hello_disable");
+export const helloUnlock = () => apiInvoke<string>("hello_unlock");
 
 // SQLite VACUUM. Returns bytes freed.
 export const optimizeDatabase = () => apiInvoke<number>("optimize_database");

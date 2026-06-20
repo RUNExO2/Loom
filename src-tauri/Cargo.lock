@@ -2340,6 +2340,7 @@ dependencies = [
  "tokio-rusqlite",
  "urlencoding",
  "uuid",
+ "windows",
  "xxhash-rust",
  "zeroize",
  "zip",

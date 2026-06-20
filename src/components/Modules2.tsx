@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { motion } from "framer-motion";
 import { listStagger, listItem } from "../lib/motionVariants";
 import { I, cx, useLoom, clickable } from "../lib/context";
@@ -819,15 +819,66 @@ export function CalendarModule() {
   const { links } = useItemStore();
   const loading = !ready;
   const [view, setView] = useState<"day" | "week" | "month" | "agenda">("week");
+  // Anchor date the grid is built around — drives prev/next/today navigation. The VM
+  // treats `now` as the focal date, so shifting the anchor moves the visible period.
+  const [anchor, setAnchor] = useState<Date>(() => new Date());
 
   const { items: allTasks } = useTasks();
   // Read-model: events projection, week/day/month buckets, agenda grouping, unscheduled
   // tasks, and the week scaffold — all in the VM. Date-grid constants stay below.
   const vm = useMemo(
-    () => createCalendarViewModel({ calendar: items, links, tasks: allTasks }, { view, now: new Date() }),
-    [items, links, allTasks, view],
+    () => createCalendarViewModel({ calendar: items, links, tasks: allTasks }, { view, now: anchor }),
+    [items, links, allTasks, view, anchor],
   );
-  const { today, todayCol, weekDates, headerTitle, weekBlocks, dayBlocks, monthCells, agenda, unscheduledTasks, eventsOn } = vm;
+  const { today, todayCol, weekDates, weekBlocks, dayBlocks, monthCells, agenda, unscheduledTasks, eventsOn } = vm;
+  // Real "today" for highlight (the VM's `today` is the anchor when navigated away).
+  const realToday = new Date();
+
+  // Period navigation: ←/→ shift by view unit, T jumps back to today.
+  const shift = useCallback((dir: number) => setAnchor((a) => {
+    const d = new Date(a);
+    if (view === "day") d.setDate(d.getDate() + dir);
+    else if (view === "month") d.setMonth(d.getMonth() + dir);
+    else d.setDate(d.getDate() + 7 * dir); // week / agenda
+    return d;
+  }), [view]);
+  const goToday = useCallback(() => setAnchor(new Date()), []);
+
+  // Navigation-aware header (only says "Today"/"This week" when the anchor is current).
+  const inCurrentPeriod = view === "month"
+    ? anchor.getMonth() === realToday.getMonth() && anchor.getFullYear() === realToday.getFullYear()
+    : view === "day"
+      ? calSameDate(anchor, realToday)
+      : weekDates.some((d) => calSameDate(d, realToday));
+  const headerTitle = (view === "month"
+    ? anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    : view === "day"
+      ? anchor.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })
+      : view === "agenda"
+        ? "Agenda"
+        : `Week of ${weekDates[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })}`)
+    + (inCurrentPeriod && view !== "agenda" ? (view === "day" ? " · Today" : " · This week") : "");
+
+  // Keyboard shortcuts: ←/→ navigate, T today, D/W/M/A switch view.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && /input|textarea|select/i.test(t.tagName)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (e.key === "ArrowLeft") shift(-1);
+      else if (e.key === "ArrowRight") shift(1);
+      else if (k === "t") goToday();
+      else if (k === "d") setView("day");
+      else if (k === "w") setView("week");
+      else if (k === "m") setView("month");
+      else if (k === "a") setView("agenda");
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [shift, goToday]);
 
   // Export the calendar to a standard iCalendar (.ics) file — importable by Google
   // Calendar, Outlook, Apple Calendar, etc. Real export, no fake sync.
@@ -950,11 +1001,18 @@ export function CalendarModule() {
     <div className="content-pad fade-in" style={{ "--mod": "var(--h-calendar)" } as any}>
       <PageHead mod="var(--h-calendar)" icon="ph-calendar-dots" kicker="Calendar" title={headerTitle}
         sub="Time-blocked schedule. Events link to the tasks, projects, and media behind them.">
+        {view !== "agenda" && (
+          <div className="seg" title="←/→ to navigate · T for today">
+            <button onClick={() => shift(-1)} title="Previous (←)"><I n="ph-caret-left" /></button>
+            <button onClick={goToday} title="Today (T)">Today</button>
+            <button onClick={() => shift(1)} title="Next (→)"><I n="ph-caret-right" /></button>
+          </div>
+        )}
         <div className="seg">
-          <button className={cx(view === "day" && "on")} onClick={() => setView("day")}>Day</button>
-          <button className={cx(view === "week" && "on")} onClick={() => setView("week")}>Week</button>
-          <button className={cx(view === "month" && "on")} onClick={() => setView("month")}>Month</button>
-          <button className={cx(view === "agenda" && "on")} onClick={() => setView("agenda")}>Agenda</button>
+          <button className={cx(view === "day" && "on")} onClick={() => setView("day")} title="Day (D)">Day</button>
+          <button className={cx(view === "week" && "on")} onClick={() => setView("week")} title="Week (W)">Week</button>
+          <button className={cx(view === "month" && "on")} onClick={() => setView("month")} title="Month (M)">Month</button>
+          <button className={cx(view === "agenda" && "on")} onClick={() => setView("agenda")} title="Agenda (A)">Agenda</button>
         </div>
         <AsyncButton className="btn outline" onClick={handleSync} icon="ph-export" loadingLabel="Exporting..." title="Export all events to an .ics file">Export .ics</AsyncButton>
         <button className="btn primary" onClick={handleNewEvent}><I n="ph-plus" w="bold" /> Event</button>
@@ -972,7 +1030,7 @@ export function CalendarModule() {
             <div style={{ display: "grid", gridTemplateColumns: "56px repeat(7,1fr)", borderBottom: "1px solid var(--border)" }}>
               <div></div>
               {dayNames.map((d, i) => {
-                const isToday = sameDate(weekDates[i], today);
+                const isToday = sameDate(weekDates[i], realToday);
                 return (
                   <div key={d} style={{ padding: "12px 10px", textAlign: "center", borderLeft: "1px solid var(--border-faint)", background: isToday ? "var(--accent-soft)" : "transparent" }}>
                     <div className="mono-sm ghost" style={{ fontSize: "var(--fs-2xs)" }}>{d.toUpperCase()}</div>
@@ -990,7 +1048,7 @@ export function CalendarModule() {
                 ))}
               </div>
               {dayNames.map((_d, di) => (
-                <div key={di} style={{ borderLeft: "1px solid var(--border-faint)", position: "relative", background: di === todayCol ? "color-mix(in oklch, var(--accent) 4%, transparent)" : "transparent" }}>
+                <div key={di} style={{ borderLeft: "1px solid var(--border-faint)", position: "relative", background: weekDates[di] && sameDate(weekDates[di], realToday) ? "color-mix(in oklch, var(--accent) 4%, transparent)" : "transparent" }}>
                   {hours.map((h) => {
                     const blockDate = new Date(weekDates[di]); blockDate.setHours(h, 0, 0, 0);
                     return (
@@ -1048,10 +1106,10 @@ export function CalendarModule() {
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 6 }}>
               {monthCells.map((d, i) => (
-                <div key={i} style={{ minHeight: 84, borderRadius: "var(--r-md)", border: d ? "1px solid var(--border-faint)" : "none", padding: d ? 6 : 0, background: d && sameDate(d, today) ? "var(--accent-soft)" : d ? "var(--surface-2)" : "transparent" }}>
+                <div key={i} style={{ minHeight: 84, borderRadius: "var(--r-md)", border: d ? "1px solid var(--border-faint)" : "none", padding: d ? 6 : 0, background: d && sameDate(d, realToday) ? "var(--accent-soft)" : d ? "var(--surface-2)" : "transparent" }}>
                   {d && (
                     <>
-                      <div style={{ fontSize: "var(--fs-sm)", fontWeight: 600, marginBottom: 4, color: sameDate(d, today) ? "var(--accent-text)" : "var(--text-faint)" }}>{d.getDate()}</div>
+                      <div style={{ fontSize: "var(--fs-sm)", fontWeight: 600, marginBottom: 4, color: sameDate(d, realToday) ? "var(--accent-text)" : "var(--text-faint)" }}>{d.getDate()}</div>
                       <div className="col" style={{ gap: 3 }}>
                         {eventsOn(d).slice(0, 3).map((e) => (
                           <div key={e.id} onClick={() => e.links && e.links.length > 0 && inspect(e.links[0])} {...clickable(() => { if (e.links && e.links.length > 0) inspect(e.links[0]) })}

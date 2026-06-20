@@ -234,7 +234,7 @@ pub async fn import_data(app: AppHandle, state: State<'_, AppState>) -> Result<O
     // Whole merge runs in ONE transaction. A crash or any failing insert mid-import
     // rolls the entire thing back (SQLite discards an uncommitted WAL txn on the next
     // open), so an interrupted import can never leave a half-restored DB.
-    state.db.call(move |mut conn| {
+    state.db.call(move |conn| {
         let res = (|| -> Result<_, String> {
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;

@@ -9,7 +9,18 @@
 // named themes are stored as a list; one is active at a time.
 
 import { getSetting, setSetting } from "../ipc/items";
+import { getCustomCss } from "../ipc/content";
 import { setCustomThemeCache, applyCombinedThemeAndBackground } from "./settings";
+
+// Live CSS reload: (re)inject the concatenated user CSS from the Custom CSS folder into a
+// single managed <style> tag. Called at launch and whenever the window regains focus, so
+// edits to the .css files show up without restarting the app.
+export async function reloadCustomCss(): Promise<void> {
+  const css = await getCustomCss().catch(() => "");
+  let el = document.getElementById("loom-custom-css") as HTMLStyleElement | null;
+  if (!el) { el = document.createElement("style"); el.id = "loom-custom-css"; document.head.appendChild(el); }
+  el.textContent = css || "";
+}
 
 export type FieldType = "color" | "scale" | "select" | "text";
 

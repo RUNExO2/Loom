@@ -5,6 +5,8 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { listStagger, listItem } from "../lib/motionVariants";
 import { I, cx, useLoom, clickable } from "../lib/context";
 import { EntityChip, EmptyState } from "./shared";
+import { NoteEditor, NoteEditorApi } from "./NoteEditor";
+import { MediaTools } from "./MediaTools";
 import { Item } from "../ipc/items";
 import { useNotes, useLibrary, useVault, useAutomations, useItemStore, useFiles } from "../lib/itemStore";
 import { vaultSession } from "../lib/vaultSession";
@@ -26,7 +28,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { fsWriteAnyFile, fsCopyFile, fsOpenFile } from "../ipc/fs";
 import { getSetting, setSetting } from "../ipc/items";
-import { encryptVaultValue, decryptVaultValue } from "../ipc/content";
+import { encryptVaultValue, decryptVaultValue, helloAvailable, helloEnrolled, helloEnable, helloDisable, helloUnlock } from "../ipc/content";
 
 function PageHead({ mod, kicker, title, sub, children, icon }: {
   mod: string; kicker: string; title: string; sub?: string; children?: React.ReactNode; icon: string;
@@ -431,11 +433,8 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   const [folderFilter, setFolderFilter] = useViewMemory("notes.folder", "all");
   const [contentHtml, setContentHtml] = useState<string>("");
   const [isEditing, setIsEditing] = useState<boolean>(false);
-  const [fontSize, setFontSize] = useState<number>(14);
 
   // Enhancements 8, 9, 10 State
-  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
-  const [slashMenuPos, setSlashMenuPos] = useState({ top: 0, left: 0 });
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
 
@@ -448,9 +447,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   const [showPhysicsPanel, setShowPhysicsPanel] = useState(false);
   const [graphTypeFilter, setGraphTypeFilter] = useState<Set<string>>(new Set(["all"]));
   const [graphPhysics, setGraphPhysics] = useState<GraphPhysics>({ repulsion: 200, attraction: 0.1, gravity: 0.05 });
-
-  // contentHtmlRef: always up-to-date with contentHtml, used by isEditing effect to avoid stale closure
-  const contentHtmlRef = useRef<string>("");
 
   useEffect(() => {
     // Load Mermaid.js for enhancement 9
@@ -471,7 +467,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
     catch (err) { console.error("Failed to pin note:", err); }
   };
 
-  const editorRef = useRef<HTMLDivElement>(null);
+  const editorApiRef = useRef<NoteEditorApi | null>(null);
   const autosaveTimer = useRef<any>(null);
 
   // Default selection
@@ -541,18 +537,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
-  // Keep contentHtmlRef in sync so isEditing effect can read latest value without stale closure
-  useEffect(() => { contentHtmlRef.current = contentHtml; }, [contentHtml]);
-
-  // Populate editor DOM once when entering edit mode — never re-run while typing
-  useEffect(() => {
-    if (isEditing && editorRef.current) {
-      editorRef.current.innerHTML = contentHtmlRef.current;
-      editorRef.current.focus();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing]);
-
   // Clean up autosave on unmount
   useEffect(() => {
     return () => {
@@ -588,45 +572,32 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
     }
   };
 
-  const handleInput = () => {
-    if (editorRef.current) {
-      const html = editorRef.current.innerHTML;
-      // Do NOT call setContentHtml here — would trigger React reconcile and reset cursor position.
-      // contentHtml is synced from the editor only when leaving edit mode.
-
-      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
-      autosaveTimer.current = setTimeout(() => {
-        saveContent(html);
-      }, 1500);
-    }
+  // Autosave: NoteEditor reports HTML on every change; debounce the disk write.
+  const handleInput = (html: string) => {
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => { saveContent(html); }, 1500);
   };
 
-  const handleKeyUp = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    // Enhancement 8: Inline Slash Commands
-    const sel = window.getSelection();
-    if (sel && sel.rangeCount > 0) {
-      const node = sel.anchorNode;
-      if (node && node.nodeType === 3 && node.textContent?.endsWith("/")) {
-        const range = sel.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
-        setSlashMenuPos({ top: rect.bottom, left: rect.left });
-        setSlashMenuOpen(true);
-      } else if (e.key === "Escape" || e.key === "Backspace") {
-        setSlashMenuOpen(false);
-      }
-    }
+  // Ctrl+S in the editor: flush, sync view content, leave edit mode.
+  const handleEditorSave = (html: string) => {
+    setContentHtml(html);
+    saveContent(html).then(() => {
+      setIsEditing(false);
+      toast("Note saved to disk", "ph-check-circle");
+    });
   };
 
-  const handleSlashCommand = (cmd: string) => {
-    setSlashMenuOpen(false);
-    // Remove the slash
-    document.execCommand("delete");
-    if (cmd === "h1") document.execCommand("formatBlock", false, "<h1>");
-    if (cmd === "h2") document.execCommand("formatBlock", false, "<h2>");
-    if (cmd === "ul") document.execCommand("insertUnorderedList");
-    if (cmd === "ol") document.execCommand("insertOrderedList");
-    if (cmd === "todo") document.execCommand("insertHTML", false, "<input type='checkbox'> ");
-    if (cmd === "mermaid") document.execCommand("insertHTML", false, "<pre><code class='language-mermaid'>graph TD;\nA-->B;</code></pre><p><br></p>");
+  // Escape in the editor: discard unsaved edits by re-reading from disk.
+  const handleEditorDiscard = () => {
+    if (activeNoteMeta?.path) {
+      readNoteContent(activeNoteMeta.path).then((html) => {
+        setContentHtml(html);
+        setIsEditing(false);
+        toast("Edits discarded", "ph-x-circle");
+      });
+    } else {
+      setIsEditing(false);
+    }
   };
 
   // Local AI summarization via Ollama (if running). No fabricated fallback — if there
@@ -636,7 +607,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
     setIsSummarizing(true);
     try {
       const tempDiv = document.createElement("div");
-      tempDiv.innerHTML = editorRef.current?.innerHTML || contentHtml;
+      tempDiv.innerHTML = editorApiRef.current?.getHTML() || contentHtml;
       const plainText = (tempDiv.innerText || "").trim();
       if (!plainText) { setAiSummary("Nothing to summarize yet."); return; }
 
@@ -728,76 +699,41 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 
   const handleExportNote = async () => {
     if (!activeNote || !activeNoteMeta?.path) return;
+    // Explicit format selector first, so the choice isn't buried in the OS dialog filters.
+    const fmt = await modal.form({ panel: true,
+      title: "Export note", icon: "ph-export", accent: "var(--h-notes)", submitLabel: "Choose location…",
+      fields: [{
+        name: "format", label: "Format", type: "select", defaultValue: "md",
+        options: [
+          { value: "md", label: "Markdown (.md)" },
+          { value: "html", label: "HTML (.html)" },
+          { value: "txt", label: "Plain text (.txt)" },
+        ],
+      }],
+    });
+    if (!fmt) return;
+    const ext = fmt.format as string;
     const dest = await save({
       title: "Export Note",
-      defaultPath: `${activeNote.title}.md`,
-      filters: [
-        { name: "Markdown", extensions: ["md"] },
-        { name: "HTML", extensions: ["html"] },
-        { name: "Plain Text", extensions: ["txt"] }
-      ]
+      defaultPath: `${activeNote.title}.${ext}`,
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
     });
     if (!dest) return;
 
-    const ext = dest.split(".").pop()?.toLowerCase();
     try {
       if (ext === "html") {
         await fsCopyFile(activeNoteMeta.path, dest);
-      } else if (ext === "md" || ext === "markdown") {
-        const mdContent = htmlToMarkdown(contentHtml);
-        await fsWriteAnyFile(dest, mdContent);
+      } else if (ext === "md") {
+        await fsWriteAnyFile(dest, htmlToMarkdown(contentHtml));
       } else {
         const tempDiv = document.createElement("div");
         tempDiv.innerHTML = contentHtml;
-        const textContent = tempDiv.innerText || tempDiv.textContent || "";
-        await fsWriteAnyFile(dest, textContent);
+        await fsWriteAnyFile(dest, tempDiv.innerText || tempDiv.textContent || "");
       }
-      toast("Note exported successfully", "ph-export");
+      toast(`Note exported as ${ext.toUpperCase()}`, "ph-export");
     } catch (err: any) {
       modal.confirm({ title: "Export Error", message: String(err), icon: "ph-warning", danger: true });
     }
-  };
-
-  const runCommand = (command: string, value: string = "") => {
-    document.execCommand(command, false, value);
-    if (editorRef.current) {
-      handleInput();
-    }
-  };
-
-  const applyFontSize = (size: number) => {
-    setFontSize(size);
-    document.execCommand("fontSize", false, "7");
-    const fontElements = document.querySelectorAll('font[size="7"]');
-    fontElements.forEach((el) => {
-      const span = document.createElement("span");
-      span.style.fontSize = `${size}px`;
-      span.innerHTML = el.innerHTML;
-      el.parentNode?.replaceChild(span, el);
-    });
-    if (editorRef.current) {
-      handleInput();
-    }
-  };
-
-  const adjustFontSize = (delta: number) => {
-    const fontSizes = [10, 12, 14, 16, 18, 20, 24, 32, 48];
-    const currentIndex = fontSizes.indexOf(fontSize);
-    let newIndex = currentIndex + delta;
-    if (newIndex >= 0 && newIndex < fontSizes.length) {
-      applyFontSize(fontSizes[newIndex]);
-    }
-  };
-
-  const addLink = () => {
-    const url = prompt("Enter hyperlink URL:");
-    if (url) {
-      runCommand("createLink", url);
-    }
-  };
-
-  const addChecklist = () => {
-    runCommand("insertHTML", '<p class="todo-line"><input type="checkbox" style="margin-right: 8px;" /> Todo item</p>');
   };
 
   const handleAttachFile = async () => {
@@ -829,7 +765,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
         attachmentHtml = `<p><a href="#" data-attachment="${imported.path}" class="attachment-card"><i class="ph ph-file-text" style="margin-right: 4px;"></i> ${imported.filename}</a></p>`;
       }
 
-      runCommand("insertHTML", attachmentHtml);
+      editorApiRef.current?.insertHTML(attachmentHtml);
       toast("File attached to note", "ph-paperclip");
     } catch (err: any) {
       modal.confirm({ title: "Error", message: String(err), icon: "ph-warning", danger: true });
@@ -839,7 +775,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   const handleAutoTag = async () => {
     if (!activeNote || !activeNoteMeta) return;
     const tempDiv = document.createElement("div");
-    tempDiv.innerHTML = editorRef.current?.innerHTML || contentHtml;
+    tempDiv.innerHTML = editorApiRef.current?.getHTML() || contentHtml;
     const text = (tempDiv.textContent || "").toLowerCase();
     const stopWords = new Set(["the","a","an","and","or","but","in","on","at","to","for","of","with","by","from","is","are","was","were","be","been","have","has","had","do","does","did","will","would","could","should","may","might","this","that","these","those","i","you","he","she","we","they","it","my","your","his","her","our","their","its","as","if","then","than","so","just","not","no","can","also","all","any","some","there","here","what","when","where","who","how","which","about","into","more","its","such","only","over","after","also","because","there","through","during","before","without","under","between","each","more","other","than","both","few","those","same","own","per","while","being","since","against","during","each","further","once"]);
     const words = text.match(/\b[a-z]{4,}\b/g) || [];
@@ -869,30 +805,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
     } catch (e) {
       console.error("Pop-out failed:", e);
       toast("Could not open pop-out window", "ph-warning");
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      if (activeNoteMeta?.path) {
-        readNoteContent(activeNoteMeta.path)
-          .then((html) => {
-            setContentHtml(html);
-            setIsEditing(false);
-            toast("Edits discarded", "ph-x-circle");
-          });
-      }
-    } else if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      if (editorRef.current) {
-        const html = editorRef.current.innerHTML;
-        setContentHtml(html);
-        saveContent(html).then(() => {
-          setIsEditing(false);
-          toast("Note saved to disk", "ph-check-circle");
-        });
-      }
     }
   };
 
@@ -931,8 +843,8 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
           } else {
             attachmentHtml = `<p><a href="#" data-attachment="${imported.path}" class="attachment-card"><i class="ph ph-file-text" style="margin-right: 4px;"></i> ${imported.filename}</a></p>`;
           }
-          if (isEditing && editorRef.current) {
-            runCommand("insertHTML", attachmentHtml);
+          if (isEditing && editorApiRef.current) {
+            editorApiRef.current.insertHTML(attachmentHtml);
           } else {
             const newHtml = contentHtml + attachmentHtml;
             await writeNoteContent(activeNote.id, newHtml);
@@ -974,8 +886,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   };
 
   const { folders, list: filtered } = notesVM;
-
-  const fontSizes = [10, 12, 14, 16, 18, 20, 24, 32, 48];
 
   const ALL_TYPES = ["note", "task", "project", "habit", "calendar", "bookmark", "library", "file"];
   const toggleTypeFilter = (t: string) => {
@@ -1066,8 +976,8 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
                   <I n="ph-export" /> Export
                 </button>
                 <button className={`btn sm ${isEditing ? "active" : ""}`} onClick={() => {
-                  if (isEditing && editorRef.current) {
-                    setContentHtml(editorRef.current.innerHTML);
+                  if (isEditing && editorApiRef.current) {
+                    setContentHtml(editorApiRef.current.getHTML());
                   }
                   setIsEditing(v => !v);
                 }}>
@@ -1101,71 +1011,9 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
                 <h1 style={{ marginTop: 0 }}>{activeNote.title}</h1>
                 
                 {isEditing ? (
-              <div className="note-editor-container">
-                <div className="note-editor-toolbar">
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("bold"); }} title="Bold"><I n="ph-text-b" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("italic"); }} title="Italic"><I n="ph-text-italic" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("underline"); }} title="Underline"><I n="ph-text-underline" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("strikeThrough"); }} title="Strikethrough"><I n="ph-text-strikethrough" w="bold" /></button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-                  
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("formatBlock", "<h1>"); }} title="Heading 1"><span style={{ fontWeight: 800 }}>H1</span></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("formatBlock", "<h2>"); }} title="Heading 2"><span style={{ fontWeight: 650 }}>H2</span></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("formatBlock", "<h3>"); }} title="Heading 3"><span style={{ fontWeight: 550 }}>H3</span></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("formatBlock", "<p>"); }} title="Paragraph"><span>P</span></button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-                  
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("insertUnorderedList"); }} title="Bullet List"><I n="ph-list-bullets" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("insertOrderedList"); }} title="Numbered List"><I n="ph-list-numbers" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); addChecklist(); }} title="Checklist"><I n="ph-square" w="bold" /></button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-
-                  <button onMouseDown={(e) => { e.preventDefault(); addLink(); }} title="Insert Link"><I n="ph-link" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("unlink"); }} title="Remove Link"><I n="ph-link-break" w="bold" /></button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("formatBlock", "<blockquote>"); }} title="Blockquote"><I n="ph-quotes" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("formatBlock", "<pre>"); }} title="Code Block"><I n="ph-code" w="bold" /></button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-
-                  <select 
-                    value={fontSize} 
-                    onChange={(e) => applyFontSize(parseInt(e.target.value))}
-                    style={{ background: "var(--surface-2)", color: "var(--text-dim)", border: "1px solid var(--border)", fontSize: "var(--fs-xs)" }}
-                  >
-                    {fontSizes.map(size => (
-                      <option key={size} value={size}>{size}px</option>
-                    ))}
-                  </select>
-                  <button onMouseDown={(e) => { e.preventDefault(); adjustFontSize(1); }} title="Increase Font"><I n="ph-plus-circle" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); adjustFontSize(-1); }} title="Decrease Font"><I n="ph-minus-circle" w="bold" /></button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-                  
-                  <button onMouseDown={(e) => { e.preventDefault(); handleAttachFile(); }} title="Attach File"><I n="ph-paperclip" w="bold" /> Attach</button>
-
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-
-                  <button onMouseDown={(e) => { e.preventDefault(); handleAISummarize(); }} title="AI Summarize" disabled={isSummarizing}>
-                    <I n={isSummarizing ? "ph-spinner" : "ph-magic-wand"} w="bold" /> {isSummarizing ? "Thinking..." : "Summarize"}
-                  </button>
-                  <button onMouseDown={(e) => { e.preventDefault(); handleAutoTag(); }} title="Auto-Tag from content">
-                    <I n="ph-tag" w="bold" /> Auto-Tag
-                  </button>
-                  
-                  <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 4px" }}></div>
-
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("undo"); }} title="Undo"><I n="ph-arrow-counter-clockwise" w="bold" /></button>
-                  <button onMouseDown={(e) => { e.preventDefault(); runCommand("redo"); }} title="Redo"><I n="ph-arrow-clockwise" w="bold" /></button>
-                </div>
-
+              <>
                 {aiSummary && (
-                  <div style={{ padding: "12px 16px", background: "var(--surface-2)", borderBottom: "1px solid var(--border)", display: "flex", gap: 12 }}>
+                  <div style={{ padding: "12px 16px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", display: "flex", gap: 12, marginTop: 14 }}>
                     <I n="ph-magic-wand" style={{ color: "var(--accent)", fontSize: 20, marginTop: 2 }} />
                     <div style={{ flex: 1, fontSize: "var(--fs-sm)", lineHeight: 1.5 }}>
                       <b style={{ color: "var(--text)" }}>AI Summary</b>
@@ -1174,36 +1022,33 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
                     <button className="btn icon sm" onClick={() => setAiSummary(null)}><I n="ph-x" /></button>
                   </div>
                 )}
-
-                {slashMenuOpen && (
-                  <div 
-                    className="slash-menu"
-                    style={{ position: "fixed", top: slashMenuPos.top + 5, left: slashMenuPos.left, zIndex: 1000, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--r-sm)", boxShadow: "var(--shadow-md)", padding: "4px", minWidth: 150 }}
-                  >
-                    <div className="muted" style={{ padding: "4px 8px", fontSize: "var(--fs-xs)", fontWeight: 600 }}>INSERT</div>
-                    <button onClick={() => handleSlashCommand("h1")} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", background: "transparent", border: "none", color: "var(--text)", cursor: "pointer", borderRadius: 4 }}><I n="ph-text-h" /> Heading 1</button>
-                    <button onClick={() => handleSlashCommand("h2")} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", background: "transparent", border: "none", color: "var(--text)", cursor: "pointer", borderRadius: 4 }}><I n="ph-text-h" /> Heading 2</button>
-                    <button onClick={() => handleSlashCommand("ul")} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", background: "transparent", border: "none", color: "var(--text)", cursor: "pointer", borderRadius: 4 }}><I n="ph-list-bullets" /> Bullet List</button>
-                    <button onClick={() => handleSlashCommand("todo")} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", background: "transparent", border: "none", color: "var(--text)", cursor: "pointer", borderRadius: 4 }}><I n="ph-square" /> To-Do</button>
-                    <button onClick={() => handleSlashCommand("mermaid")} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px", background: "transparent", border: "none", color: "var(--text)", cursor: "pointer", borderRadius: 4 }}><I n="ph-code" /> Mermaid Diagram</button>
-                  </div>
-                )}
-
-                <div
-                  ref={editorRef}
-                  className="note-editor-body"
-                  contentEditable={true}
-                  suppressContentEditableWarning={true}
-                  data-placeholder="Start writing… press “/” for commands"
-                  onInput={handleInput}
-                  onKeyDown={handleKeyDown}
-                  onKeyUp={handleKeyUp}
+                <NoteEditor
+                  key={activeNote.id}
+                  apiRef={editorApiRef}
+                  initialHtml={contentHtml}
+                  onChange={handleInput}
+                  onSave={handleEditorSave}
+                  onDiscard={handleEditorDiscard}
+                  onAttach={handleAttachFile}
+                  onSummarize={handleAISummarize}
+                  onAutoTag={handleAutoTag}
+                  summarizing={isSummarizing}
+                  extraTools={(editor) => (
+                    <MediaTools
+                      editor={editor}
+                      importFile={importFile}
+                      toast={toast}
+                      confirmCopy={(filename) => modal.confirm({
+                        title: "Embed Strategy",
+                        message: `Embed: ${filename}\n\nCopy file into Loom or keep it where it is?`,
+                        icon: "ph-monitor-play",
+                        confirmLabel: "Copy to Loom",
+                        cancelLabel: "Keep Reference",
+                      })}
+                    />
+                  )}
                 />
-                <div style={{ padding: "6px 16px", background: "var(--surface-2)", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }} className="mono-sm ghost">
-                  <span>Double-click note content to edit · Escape to discard · Ctrl+S to save</span>
-                  <span>Autosaving...</span>
-                </div>
-              </div>
+              </>
             ) : (
               <div 
                 className="note-editor-body"
@@ -1837,6 +1682,9 @@ export function VaultModule() {
   const [hasMasterPassword, setHasMasterPassword] = useState<boolean | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  // Windows Hello: available = enrolled on the OS; helloOn = linked to this vault.
+  const [helloAvail, setHelloAvail] = useState(false);
+  const [helloOn, setHelloOn] = useState(false);
 
   // Read-model: credential rows (meta + live link count). No decryption here — the
   // encrypted secret stays opaque until vaultSession unlocks it in handleViewDetails.
@@ -1848,7 +1696,44 @@ export function VaultModule() {
         setHasMasterPassword(!!val);
       })
       .catch(console.error);
+    helloAvailable().then(setHelloAvail).catch(() => setHelloAvail(false));
+    helloEnrolled().then(setHelloOn).catch(() => setHelloOn(false));
   }, []);
+
+  // Unlock the vault with Windows Hello: prompt biometric/PIN, get the stored master
+  // password back, then verify it against the saved token before opening the session.
+  const handleHelloUnlock = async () => {
+    try {
+      const pw = await helloUnlock();
+      const verif = await getSetting("vault_verification");
+      if (verif && (await decryptVaultValue(verif, pw)) === "verification_token") {
+        vaultSession.unlock(pw);
+        setErrorMsg("");
+        setPasswordInput("");
+      } else {
+        setErrorMsg("Saved Hello credential no longer matches the master password.");
+      }
+    } catch (err: any) {
+      setErrorMsg(String(err).replace(/^Error:\s*/, ""));
+    }
+  };
+
+  // Link/unlink the current vault to Windows Hello (requires an unlocked session).
+  const toggleHello = async () => {
+    try {
+      if (helloOn) {
+        await helloDisable();
+        setHelloOn(false);
+        toast("Windows Hello unlock disabled", "ph-lock");
+      } else {
+        await helloEnable(vaultSession.access());
+        setHelloOn(true);
+        toast("Windows Hello unlock enabled", "ph-fingerprint");
+      }
+    } catch (err: any) {
+      toast(String(err).replace(/^Error:\s*/, ""), "ph-warning");
+    }
+  };
 
   const handleSetUpMaster = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2136,6 +2021,18 @@ export function VaultModule() {
             {errorMsg && <div style={{ color: "var(--danger)", fontSize: "var(--fs-xs)" }}><I n="ph-warning-circle" /> {errorMsg}</div>}
             <button type="submit" className="btn primary" style={{ width: "100%", justifyContent: "center" }}>Unlock</button>
           </form>
+          {helloAvail && helloOn && (
+            <>
+              <div className="row" style={{ alignItems: "center", gap: 8, margin: "4px 0" }}>
+                <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                <span className="muted" style={{ fontSize: "var(--fs-2xs)" }}>OR</span>
+                <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+              </div>
+              <button type="button" className="btn outline" style={{ width: "100%", justifyContent: "center" }} onClick={handleHelloUnlock}>
+                <I n="ph-fingerprint" /> Unlock with Windows Hello
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -2145,6 +2042,11 @@ export function VaultModule() {
     <div className="content-pad fade-in" style={{ "--mod": "var(--h-vault)" } as any}>
       <PageHead mod="var(--h-vault)" icon="ph-vault" kicker="Vault" title="Secure vault"
         sub="A registry of credentials, keys, and secure notes — titles and links, organised in one place.">
+        {helloAvail && (
+          <button className={cx("btn outline", helloOn && "active")} onClick={toggleHello} title={helloOn ? "Disable Windows Hello unlock" : "Enable Windows Hello unlock"}>
+            <I n="ph-fingerprint" /> {helloOn ? "Hello: On" : "Enable Hello"}
+          </button>
+        )}
         <button className="btn outline" onClick={() => { vaultSession.lock(); setPasswordInput(""); }}><I n="ph-lock" /> Lock Vault</button>
         <button className="btn primary" onClick={handleAdd}><I n="ph-plus" w="bold" /> Add credential</button>
       </PageHead>
@@ -2206,24 +2108,64 @@ function ExecutionHistory({ automationId, title, onBack }: { automationId?: stri
   const [rows, setRows] = useState<ExecutionRow[] | null>(null);
   const [sel, setSel] = useState<ExecutionRow | null>(null);
   const [filter, setFilter] = useState<string>("ALL");
+  const [search, setSearch] = useState("");
 
   const load = useCallback(() => {
     getAutomationExecutions(automationId, 200).then(setRows).catch((e) => { console.error(e); setRows([]); });
   }, [automationId]);
   useEffect(() => { load(); }, [load]);
 
-  const view = filterExecutions(rows, filter);
+  const statusView = filterExecutions(rows, filter);
+  const q = search.trim().toLowerCase();
+  const view = q
+    ? statusView.filter((r) => `${r.trigger_source} ${r.error || ""} ${r.output || ""}`.toLowerCase().includes(q))
+    : statusView;
+
+  // Aggregate stats over all loaded runs — the "advanced" summary of the log.
+  const stats = useMemo(() => {
+    const r = rows || [];
+    const by = (s: string) => r.filter((x) => x.status === s).length;
+    const durs = r.map((x) => x.duration_ms).filter((d): d is number => d != null);
+    const avg = durs.length ? Math.round(durs.reduce((a, b) => a + b, 0) / durs.length) : null;
+    return { total: r.length, success: by("SUCCESS"), failed: by("FAILED"), partial: by("PARTIAL"), avg };
+  }, [rows]);
+
+  const exportLog = async () => {
+    const dest = await save({ title: "Export automation log", defaultPath: `automation-log.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (!dest) return;
+    try {
+      await fsWriteAnyFile(dest, JSON.stringify(view, null, 2));
+    } catch (e) { console.error("Log export failed", e); }
+  };
 
   return (
     <div className="col gap16">
       <div className="row gap8" style={{ alignItems: "center" }}>
         <button className="btn sm" onClick={onBack}><I n="ph-arrow-left" /> Back</button>
         <h2 style={{ fontSize: "var(--fs-lg)", fontWeight: 600, flex: 1 }}>History · {title}</h2>
-        <select style={{ ...fld, width: 140 }} value={filter} onChange={(e) => setFilter(e.target.value)}>
+        <input style={{ ...fld, width: 180 }} placeholder="Search log…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select style={{ ...fld, width: 130 }} value={filter} onChange={(e) => setFilter(e.target.value)}>
           {["ALL", "SUCCESS", "FAILED", "PARTIAL", "SKIPPED", "RUNNING"].map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
+        <button className="btn sm" onClick={exportLog} title="Export filtered log to JSON"><I n="ph-export" /> Export</button>
         <button className="btn sm" onClick={load}><I n="ph-arrows-clockwise" /> Refresh</button>
       </div>
+      {rows && rows.length > 0 && (
+        <div className="row gap8" style={{ flexWrap: "wrap" }}>
+          {[
+            { label: "Runs", value: stats.total, color: "var(--text-dim)" },
+            { label: "Success", value: stats.success, color: "var(--sys-good, var(--accent))" },
+            { label: "Failed", value: stats.failed, color: "var(--danger)" },
+            { label: "Partial", value: stats.partial, color: "var(--sys-warn, var(--accent))" },
+            { label: "Avg", value: stats.avg != null ? `${stats.avg}ms` : "—", color: "var(--text-dim)" },
+          ].map((s) => (
+            <div key={s.label} style={{ ...fld, width: "auto", padding: "6px 12px", display: "flex", gap: 8, alignItems: "baseline" }}>
+              <span style={{ fontWeight: 700, color: s.color }}>{s.value}</span>
+              <span className="mono-sm ghost">{s.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {rows === null ? <div className="muted">Loading…</div>
         : view.length === 0 ? <EmptyState icon="ph-clock-counter-clockwise" mod="var(--h-automation)" title="No runs yet" sub="Run the automation or wait for its trigger to fire." />
         : (

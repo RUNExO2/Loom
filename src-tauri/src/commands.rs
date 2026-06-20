@@ -60,6 +60,25 @@ where
     Ok(result)
 }
 
+// Startup ledger reconciliation. A row stuck at STAGED means the process died after
+// staging intent but before the transaction committed — SQLite already rolled the data
+// back, so the truthful terminal state is FAILED. Then cap the ledger so this audit log
+// can't grow without bound. Returns (reconciled, pruned) for the boot log.
+pub(crate) fn sweep_stale_ledger(conn: &rusqlite::Connection) -> Result<(usize, usize), String> {
+    let reconciled = conn
+        .execute("UPDATE mutation_ledger SET status = 'FAILED' WHERE status = 'STAGED'", [])
+        .map_err(|e| e.to_string())?;
+    // ponytail: keep the last 1000 by created_at; raise the cap if forensics needs deeper history.
+    let pruned = conn
+        .execute(
+            "DELETE FROM mutation_ledger WHERE id NOT IN \
+             (SELECT id FROM mutation_ledger ORDER BY created_at DESC, rowid DESC LIMIT 1000)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((reconciled, pruned))
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct IntegrityResult {
     pub ok: bool,
@@ -616,6 +635,15 @@ pub async fn delete_saved_search(state: State<'_, AppState>, id: String) -> Resu
 
 
 pub(crate) fn create_link_impl(conn: &rusqlite::Connection, source_id: String, target_id: String, relationship_type: String) -> Result<Link, String> {
+    // Links may only connect two existing items in the SAME workspace. Blocks hidden
+    // cross-workspace edges (a data-leak vector) and dangling links to missing items.
+    let src_ws: Option<String> = conn.query_row("SELECT workspace_id FROM items WHERE id = ? AND deleted = 0", [&source_id], |r| r.get(0)).ok();
+    let tgt_ws: Option<String> = conn.query_row("SELECT workspace_id FROM items WHERE id = ? AND deleted = 0", [&target_id], |r| r.get(0)).ok();
+    match (src_ws, tgt_ws) {
+        (Some(a), Some(b)) if a == b => {}
+        _ => return Err("Refusing cross-workspace or dangling link".into()),
+    }
+
     conn.execute(
         "INSERT OR IGNORE INTO links (source_id, target_id, relationship_type) VALUES (?, ?, ?)",
         [source_id.clone(), target_id.clone(), relationship_type.clone()],
@@ -1001,6 +1029,16 @@ pub async fn delete_item(state: State<'_, AppState>, id: String, app_handle: tau
                 if rows_changed == 0 {
                     return Err(format!("Item '{}' not found or already deleted", id_clone));
                 }
+
+                // Drop edges touching this item in the SAME tx. Otherwise they become
+                // orphan links (endpoint now deleted=0-filtered), which the two-phase
+                // integrity check counts as a NEW regression and rejects the delete —
+                // i.e. any linked item would be undeletable. Undo re-inserts them from
+                // the snapshot via restore_snapshot_impl.
+                tx.execute(
+                    "DELETE FROM links WHERE source_id = ?1 OR target_id = ?1",
+                    [id_clone.clone()],
+                ).map_err(|e| e.to_string())?;
 
                 Ok(DeletedId { id: id_clone.clone() })
             });
@@ -1504,6 +1542,19 @@ mod tests {
     }
 
     #[test]
+    fn test_link_rejects_cross_workspace_and_dangling() {
+        let conn = setup_test_db();
+        conn.execute("INSERT INTO workspaces (id, name) VALUES ('ws-2','Other')", []).unwrap();
+        let a = create_item_impl(&conn, "ws-1".into(), "A".into(), "note".into(), "{}".into()).unwrap();
+        let b = create_item_impl(&conn, "ws-2".into(), "B".into(), "note".into(), "{}".into()).unwrap();
+        // cross-workspace link is refused
+        assert!(create_link_impl(&conn, a.id.clone(), b.id.clone(), "related".into()).is_err());
+        // dangling target is refused
+        assert!(create_link_impl(&conn, a.id.clone(), "nope".into(), "related".into()).is_err());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM links", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
     fn test_restore_snapshot_transaction() {
         let mut conn = setup_test_db();
         
@@ -1697,6 +1748,37 @@ mod tests {
         restore_snapshot_impl(&conn, a.clone(), vec![link.clone()]).unwrap(); // double-apply
         let links: i64 = conn.query_row("SELECT COUNT(*) FROM links", [], |r| r.get(0)).unwrap();
         assert_eq!(links, 1, "INSERT OR IGNORE keeps link unique across repeated restores");
+    }
+
+    // ── A linked item must be deletable: edges are cleared in the SAME tx so the
+    //    two-phase integrity guard sees no new orphan link (regression DEBT-002). ──
+    #[test]
+    fn linked_item_is_deletable_when_edges_cleared() {
+        let mut conn = setup_test_db();
+        let a = create_item_impl(&conn, "ws-1".into(), "A".into(), "note".into(), "{}".into()).unwrap();
+        let b = create_item_impl(&conn, "ws-1".into(), "B".into(), "note".into(), "{}".into()).unwrap();
+        create_link_impl(&conn, a.id.clone(), b.id.clone(), "related".into()).unwrap();
+
+        // Soft-deleting a linked item WITHOUT clearing its edge leaves an orphan link;
+        // execute_two_phase's regression guard rejects it (and rolls back, so A stays live).
+        let id = a.id.clone();
+        let bad = execute_two_phase(&mut conn, "delete_item", "{}", |tx| {
+            tx.execute("UPDATE items SET deleted = 1 WHERE id = ?", [&id]).map_err(|e| e.to_string())?;
+            Ok(())
+        });
+        assert!(bad.is_err(), "delete without edge cleanup must be rejected by the integrity guard");
+        assert!(verify_integrity_impl(&conn, a.id.clone(), true).unwrap(), "rollback kept A live");
+
+        // Clearing the edge in the same tx passes integrity → delete succeeds.
+        let id = a.id.clone();
+        let good = execute_two_phase(&mut conn, "delete_item", "{}", |tx| {
+            tx.execute("UPDATE items SET deleted = 1 WHERE id = ?", [&id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM links WHERE source_id = ?1 OR target_id = ?1", [&id]).map_err(|e| e.to_string())?;
+            Ok(())
+        });
+        assert!(good.is_ok(), "delete with edge cleanup must pass integrity: {:?}", good.err());
+        assert!(!verify_integrity_impl(&conn, a.id.clone(), true).unwrap(), "A is now deleted");
+        assert_eq!(live_edge(&conn, &a.id, &b.id), 0, "edge removed");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
