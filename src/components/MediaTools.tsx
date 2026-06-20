@@ -3,6 +3,7 @@ import { Editor } from "@tiptap/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { I } from "../lib/context";
+import { useModal } from "./Modal";
 import { MediaKind, toEmbedUrl } from "./MediaEmbed";
 
 interface MediaToolsProps {
@@ -20,6 +21,7 @@ const PICKERS: { kind: MediaKind; label: string; icon: string; ext: string[] }[]
 
 export function MediaTools({ editor, importFile, toast, confirmCopy }: MediaToolsProps) {
   const [open_, setOpen] = useState(false);
+  const modal = useModal();
 
   const insertLocal = async (kind: MediaKind, ext: string[]) => {
     setOpen(false);
@@ -37,9 +39,10 @@ export function MediaTools({ editor, importFile, toast, confirmCopy }: MediaTool
     }
   };
 
-  const insertWeb = () => {
+  const insertWeb = async () => {
     setOpen(false);
-    const url = window.prompt("Embed a web page or video (URL):", "https://");
+    const r = await modal.form({ title: "Embed web page or video", icon: "ph-globe", submitLabel: "Embed", fields: [{ name: "url", label: "URL", type: "url", placeholder: "https://", required: true }] });
+    const url = r?.url?.trim();
     if (!url || url === "https://") return;
     editor.chain().focus().setMediaEmbed({ kind: "web", src: toEmbedUrl(url), title: url }).run();
     toast("Web embed inserted", "ph-globe");

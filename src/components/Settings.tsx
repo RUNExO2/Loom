@@ -17,7 +17,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { exportData, backupDatabase, importData, clearAllUserData } from "../ipc/settings";
 import { exportWorkspaceArchive, importWorkspaceArchive } from "../ipc/workspaces";
 import { useModal } from "./Modal";
-import { mutationEngine } from "../lib/mutationEngine";
+import { freezeMutations, unfreezeMutations } from "../lib/mutationGuard";
 import { Button } from "./ui/Button";
 import { ThemeStudio } from "./ThemeStudio";
 import { RecoveryPanel } from "./RecoveryPanel";
@@ -201,7 +201,7 @@ export function SettingsModule() {
     setBusy("clearing");
     try {
       // Step 0: Freeze all frontend systems before making ANY backend calls
-      mutationEngine.freeze();
+      freezeMutations();
 
       // Step 1-7: The backend wipe (includes backend system freeze)
       await clearAllUserData();
@@ -215,7 +215,7 @@ export function SettingsModule() {
     } catch (e) {
       console.error("Clear app data failed:", e);
       toast("Failed to clear app data", "ph-warning");
-      mutationEngine.unfreeze(); // Safe recovery
+      unfreezeMutations(); // Safe recovery
       setBusy(null);
     }
   };

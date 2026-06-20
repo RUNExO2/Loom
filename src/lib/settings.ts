@@ -231,7 +231,10 @@ export function applyCombinedThemeAndBackground() {
     delete document.documentElement.dataset.parallax;
   } else {
     document.documentElement.dataset.bg = "on";
-    if (currentBgConfig.bgParallax) {
+    // Honor prefers-reduced-motion: never drive the JS mousemove parallax for users
+    // who asked for reduced motion (the onMove listener no-ops when this flag is unset).
+    const reducedMotion = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (currentBgConfig.bgParallax && !reducedMotion) {
       document.documentElement.dataset.parallax = "on";
     } else {
       delete document.documentElement.dataset.parallax;
@@ -320,6 +323,12 @@ export const SHORTCUTS: Shortcut[] = [
     keys: ["Ctrl/⌘", "K"],
     label: "Open command palette & search",
     test: (e) => (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k",
+  },
+  {
+    id: "quickswitch",
+    keys: ["Ctrl/⌘", "O"],
+    label: "Quick-switch to any item",
+    test: (e) => (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o",
   },
   {
     id: "close",

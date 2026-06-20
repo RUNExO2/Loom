@@ -7,6 +7,7 @@ import { Image } from "@tiptap/extension-image";
 import { TaskList, TaskItem } from "@tiptap/extension-list";
 import { Placeholder } from "@tiptap/extension-placeholder";
 import { MediaEmbed } from "./MediaEmbed";
+import { useModal } from "./Modal";
 import { I } from "../lib/context";
 
 // Imperative handle so the parent's existing actions (attach file, AI summarize,
@@ -84,6 +85,7 @@ export interface NoteEditorProps {
 }
 
 export function NoteEditor({ apiRef, initialHtml, onChange, onSave, onDiscard, onAttach, onSummarize, onAutoTag, summarizing, extraTools }: NoteEditorProps) {
+  const modal = useModal();
   const [, force] = useState(0); // re-render toolbar active states on selection change
   const [slash, setSlash] = useState<{ open: boolean; query: string; from: number; top: number; left: number; index: number }>(
     { open: false, query: "", from: 0, top: 0, left: 0, index: 0 },
@@ -213,10 +215,11 @@ export function NoteEditor({ apiRef, initialHtml, onChange, onSave, onDiscard, o
         {fmtBtn(() => editor.chain().focus().toggleOrderedList().run(), "Numbered List", "ph-list-numbers", editor.isActive("orderedList"))}
         {fmtBtn(() => editor.chain().focus().toggleTaskList().run(), "Checklist", "ph-check-square", editor.isActive("taskList"))}
         <div className="tb-sep" />
-        {fmtBtn(() => {
+        {fmtBtn(async () => {
           const prev = editor.getAttributes("link").href;
-          const url = window.prompt("Enter hyperlink URL:", prev || "https://");
-          if (url === null) return;
+          const r = await modal.form({ title: "Insert link", icon: "ph-link", submitLabel: "Apply", fields: [{ name: "url", label: "URL", type: "url", defaultValue: prev || "https://", placeholder: "https://" }] });
+          if (r === null) return;
+          const url = (r.url || "").trim();
           if (url === "") { editor.chain().focus().unsetLink().run(); return; }
           editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
         }, "Insert Link", "ph-link", editor.isActive("link"))}

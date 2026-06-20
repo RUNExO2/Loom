@@ -478,8 +478,10 @@ fn run_automation(
     let mut last_completed: i64 = -1;
     let mut error: Option<String> = None;
     let mut mutated = false;
-    let savepoint_name = format!("run_{}", exec_id.replace("-", ""));
-    let _ = conn.execute(&format!("SAVEPOINT {}", savepoint_name), []);
+    // ponytail: no outer savepoint. Each action commits atomically in its own
+    // SAVEPOINT (execute_two_phase). The failure model below is explicitly
+    // "no cross-action rollback" — completed actions stay durable (PARTIAL),
+    // the rest never run. A wrapping ROLLBACK here would undo that progress.
 
     for (idx, action) in actions.iter().enumerate() {
         if count >= MAX_ACTIONS_PER_RUN {
@@ -522,13 +524,6 @@ fn run_automation(
         }
     }
 
-    if error.is_some() {
-        let _ = conn.execute(&format!("ROLLBACK TO SAVEPOINT {}", savepoint_name), []);
-        mutated = false;
-    } else {
-        let _ = conn.execute(&format!("RELEASE SAVEPOINT {}", savepoint_name), []);
-    }
-
     let dur = chrono::Local::now()
         .signed_duration_since(started)
         .num_milliseconds();
@@ -557,8 +552,15 @@ fn run_automation(
         ],
     );
 
+    // Record the run on the automation item. SUCCESS bumps the success counter AND
+    // stamps lastRun. A PARTIAL run committed durable work, so it must update lastRun
+    // too (otherwise the card shows a stale "last run" and lies that nothing ran) — but
+    // it is not a success, so it does not bump the counter. A FAILED run committed
+    // nothing, so it is not recorded as a run at all.
     if error.is_none() {
-        bump_runs(conn, &auto.id);
+        record_run(conn, &auto.id, true);
+    } else if mutated {
+        record_run(conn, &auto.id, false);
     }
     prune_history(conn, &auto.id);
     mutated
@@ -602,11 +604,14 @@ fn prune_history(conn: &Connection, automation_id: &str) {
 
 // One-shot startup recovery: any execution still marked RUNNING was interrupted by a
 // crash/restart (the engine never leaves a row RUNNING on a clean finish), so close it
-// out as FAILED instead of leaving a phantom in-flight run in the stats.
+// out instead of leaving a phantom in-flight run in the stats. Post-E9 each action
+// commits durably as it runs (and actions_executed is updated in autocommit), so a run
+// that already committed work is PARTIAL — marking it FAILED would lie that nothing
+// happened while those items live on in the user's data/graph. Zero work → FAILED.
 pub fn recover_interrupted(conn: &Connection) {
     let _ = conn.execute(
         "UPDATE automation_executions SET \
-         status = 'FAILED', \
+         status = CASE WHEN actions_executed > 0 THEN 'PARTIAL' ELSE 'FAILED' END, \
          error = COALESCE(error, 'interrupted: app restart'), \
          finished_at = COALESCE(finished_at, started_at) \
          WHERE status = 'RUNNING'",
@@ -640,7 +645,10 @@ fn record_skip(
 }
 
 // Real run counter — replaces the old frozen seed number. Stored back in metadata.
-fn bump_runs(conn: &Connection, automation_id: &str) {
+// Stamp lastRun on the automation item, and bump the success counter when this was a
+// clean (SUCCESS) run. PARTIAL runs pass bump_count=false: they update lastRun but the
+// `runs` counter stays a count of fully-successful completions.
+fn record_run(conn: &Connection, automation_id: &str, bump_count: bool) {
     let meta_s: String = match conn.query_row(
         "SELECT metadata FROM items WHERE id = ?",
         [automation_id],
@@ -650,8 +658,10 @@ fn bump_runs(conn: &Connection, automation_id: &str) {
         Err(_) => return,
     };
     let mut meta: Value = serde_json::from_str(&meta_s).unwrap_or_else(|_| json!({}));
-    let runs = meta.get("runs").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
-    meta["runs"] = json!(runs);
+    if bump_count {
+        let runs = meta.get("runs").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+        meta["runs"] = json!(runs);
+    }
     meta["lastRun"] = json!(chrono::Local::now().to_rfc3339());
     let _ = conn.execute(
         "UPDATE items SET metadata = ?1 WHERE id = ?2",
@@ -1283,7 +1293,7 @@ mod tests {
         assert_eq!(executed, 3, "all three actions counted");
     }
 
-    // ── Failed action → FAILED status, halts run, no run bump ──────────────────
+    // ── Failed action after a commit → PARTIAL, halts run, no success bump ─────
     #[test]
     fn failed_action_marks_run_failed_and_halts() {
         let mut c = db();
@@ -1306,9 +1316,11 @@ mod tests {
         // BeforeFail committed a durable side effect, then the run failed → PARTIAL.
         assert_eq!(status, "PARTIAL");
         assert!(err.unwrap().contains("unknown action type"), "error message recorded");
-        // FAILED run must NOT bump the success counter.
+        // A PARTIAL run must NOT bump the success counter, but it DID run and commit
+        // durable work, so lastRun must be stamped (the card can't claim it never ran).
         let meta: Value = serde_json::from_str(&c.query_row("SELECT metadata FROM items WHERE id=?1", [&aid], |r| r.get::<_,String>(0)).unwrap()).unwrap();
-        assert_eq!(meta.get("runs").and_then(|v| v.as_i64()).unwrap_or(0), 0, "failed run does not bump runs");
+        assert_eq!(meta.get("runs").and_then(|v| v.as_i64()).unwrap_or(0), 0, "partial run does not bump success counter");
+        assert!(meta.get("lastRun").and_then(|v| v.as_str()).is_some(), "partial run stamps lastRun");
     }
 
     // ── stop action halts remaining actions, still SUCCESS ────────────────────
@@ -1353,6 +1365,22 @@ mod tests {
         recover_interrupted(&c);
         let still: i64 = c.query_row("SELECT COUNT(*) FROM automation_executions WHERE status='RUNNING'", [], |r| r.get(0)).unwrap();
         assert_eq!(still, 0, "no RUNNING rows remain");
+    }
+
+    // ── Restart recovery: a run that committed work before crashing → PARTIAL ──
+    #[test]
+    fn recover_interrupted_partial_when_actions_committed() {
+        let c = db();
+        let aid = add_automation(&c, json!({ "on": true }));
+        c.execute(
+            "INSERT INTO automation_executions (id, automation_id, workspace_id, trigger_source, status, started_at, actions_executed) \
+             VALUES ('stuck', ?1, 'ws', 'event:x', 'RUNNING', ?2, 2)",
+            rusqlite::params![aid, chrono::Local::now().to_rfc3339()],
+        ).unwrap();
+        recover_interrupted(&c);
+        let status: String = c.query_row(
+            "SELECT status FROM automation_executions WHERE id='stuck'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "PARTIAL", "durable progress before crash → PARTIAL, not FAILED");
     }
 
     // ── Scheduler: interval trigger fires once, then waits out its interval ────
@@ -1625,8 +1653,8 @@ mod tests {
         assert_eq!(a3, 0, "action after failure must not run");
     }
 
-    // Crash mid-run: RUNNING→FAILED on restart, executed-action history preserved
-    // exactly as-is, and NOT replayed.
+    // Crash mid-run that had committed work: RUNNING→PARTIAL on restart (the durable
+    // actions are real), executed-action history preserved exactly as-is, NOT replayed.
     #[test]
     fn crash_recovery_preserves_action_log_and_does_not_replay() {
         let c = db();
@@ -1646,7 +1674,7 @@ mod tests {
         let (status, lci): (String, i64) = c.query_row(
             "SELECT status, last_completed_index FROM automation_executions WHERE id='r1'",
             [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(status, "FAILED", "interrupted run closed FAILED");
+        assert_eq!(status, "PARTIAL", "interrupted run that committed work → PARTIAL");
         assert_eq!(lci, 1, "progress index preserved exactly as-is");
         let logn: i64 = c.query_row("SELECT COUNT(*) FROM automation_action_log WHERE run_id='r1'", [], |r| r.get(0)).unwrap();
         assert_eq!(logn, 2, "executed-action history preserved, not cleared or replayed");

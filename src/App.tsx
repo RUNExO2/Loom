@@ -73,7 +73,9 @@ const NOTE_EXTS = new Set(["txt", "md", "markdown", "rtf", "docx", "html"]);
 export function App() {
   const { resolve, refresh, items, workspaceId, create } = useItemStore();
   const { undo, redo, canUndo, canRedo, undoLabel, redoLabel } = useCommands();
-  const navGroups = buildNav(items);
+  // buildNav re-filters every item several times; memoize so it only recomputes when
+  // the item set actually changes, not on every unrelated App re-render.
+  const navGroups = useMemo(() => buildNav(items), [items]);
   // Pop-out windows open with ?view=&focus= so a new native window lands on the right
   // module and item (used by note + connections pop-out buttons).
   const initialParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
@@ -204,6 +206,8 @@ export function App() {
       for (const sc of SHORTCUTS) {
         if (!sc.test(e)) continue;
         if (sc.id === "palette") { e.preventDefault(); setPalette((p) => !p); }
+        // Quick-switcher reuses the palette (recents + fuzzy item jump); just opens it.
+        else if (sc.id === "quickswitch") { e.preventDefault(); setPalette(true); }
         else if (sc.id === "close") { setPalette(false); setInspectId(null); setShortcutsOpen(false); }
         // Inside a text field, let the browser's native text undo/redo win.
         else if (sc.id === "undo") { if (isTyping()) return; e.preventDefault(); undo(); }
@@ -296,16 +300,20 @@ export function App() {
       }
     };
 
-    // Run once after 5s, then every 30s
-    const initialTimeout = setTimeout(() => {
-      runSweep();
-    }, 5000);
-
-    const interval = setInterval(runSweep, 30 * 1000);
+    // ponytail: idle/visibility-gated poll, not event-driven. A true post-mutation
+    // sweep (fire only on writes) is the upgrade if this still shows on a profiler.
+    // Skip while the window is hidden — the local DB can't change with no one driving it.
+    const tick = () => { if (document.visibilityState === "visible") runSweep(); };
+    const initialTimeout = setTimeout(tick, 5000);
+    const interval = setInterval(tick, 120 * 1000);
+    // Catch up once when the user comes back to a previously-hidden window.
+    const onVisible = () => { if (document.visibilityState === "visible") runSweep(); };
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
       clearTimeout(initialTimeout);
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [ready, workspaceId, refresh, toast]);
 

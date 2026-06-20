@@ -3,7 +3,6 @@ import { render, fireEvent, act, waitFor } from "@testing-library/react";
 import { Dashboard } from "../components/Dashboard";
 import { ItemStoreProvider } from "../lib/itemStore";
 import * as itemsIpc from "../ipc/items";
-import { BrowserRouter } from "react-router-dom";
 import { LoomCtx } from "../lib/context";
 
 // 1. Mock the IPC layer for absolute isolation
@@ -85,13 +84,11 @@ describe("Phase 5 Dashboard React Runtime Validation", () => {
   };
 
   const TestApp = ({ editing = false }: { editing?: boolean }) => (
-    <BrowserRouter>
-      <LoomCtx.Provider value={mockLoomCtx}>
-        <ItemStoreProvider>
-          <Dashboard editing={editing} setEditing={() => {}} />
-        </ItemStoreProvider>
-      </LoomCtx.Provider>
-    </BrowserRouter>
+    <LoomCtx.Provider value={mockLoomCtx}>
+      <ItemStoreProvider>
+        <Dashboard editing={editing} setEditing={() => {}} />
+      </ItemStoreProvider>
+    </LoomCtx.Provider>
   );
 
   it("1. Workspace Isolation & Restart Persistence: Loads correct isolated dashboard layout", async () => {

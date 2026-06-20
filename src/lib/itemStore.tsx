@@ -4,13 +4,13 @@ import { unfreezeSystem } from "../ipc/settings";
 import { getWorkspaces, createWorkspace } from "../ipc/workspaces";
 import {
   getItems, createItem as ipcCreate, updateItem as ipcUpdate, updateItemMetadata as ipcUpdateMeta,
-  deleteItem as ipcDelete, restoreSnapshot as ipcRestoreSnapshot, verifyIntegrity, Item,
+  deleteItem as ipcDelete, restoreSnapshot as ipcRestoreSnapshot, Item,
   getDashboardLayout, saveDashboardLayout, DashboardWidget
 } from "../ipc/items";
 import { getAllLinks, createLink, deleteLink, Link } from "../ipc/links";
 import { buildAdjacency } from "./relations";
 import { TYPE_ICON, TYPE_COLOR } from "./typeMeta";
-import { mutationEngine, MutationStep } from "./mutationEngine";
+import { assertNotFrozen } from "./mutationGuard";
 import { vaultSession } from "./vaultSession";
 // `D` (the mock dataset) is imported ONLY for the one-time empty-DB seed below.
 // It is never read while rendering — the UI reads SQLite through this store.
@@ -373,232 +373,58 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
     await emit("loom://event", event);
   };
 
+  // Each mutation = an atomic Rust IPC write + a UI event emit. The Rust write is
+  // transactional (E9 savepoint model), so there is no JS rollback to orchestrate:
+  // a failed write commits nothing. assertNotFrozen preserves the wipe-path guard.
   const create = useCallback(async (type: string, title: string, meta?: any) => {
     if (!workspaceId) throw new Error("No workspace");
+    assertNotFrozen(`Create ${type}`);
     const metaString = meta !== undefined ? JSON.stringify(meta) : "{}";
-    
-    let createdItem: Item | null = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Create Item",
-        execute: async () => {
-          createdItem = await ipcCreate(workspaceId, title, type, metaString);
-          await verifyIntegrity(createdItem.id, true);
-          return createdItem;
-        },
-        rollback: async () => {
-          if (createdItem) {
-            await ipcDelete(createdItem.id);
-          }
-        }
-      },
-      {
-        name: "Emit Creation Event",
-        execute: async () => {
-          if (createdItem) {
-            await emitLoomEvent({ type: 'ITEM_CREATED', payload: createdItem });
-          }
-          return createdItem;
-        },
-        rollback: async () => {
-          if (createdItem) {
-            await emitLoomEvent({ type: 'ITEM_DELETED', payload: { id: createdItem.id } });
-          }
-        }
-      }
-    ];
-
-    return await mutationEngine.executeMutation(`Create ${type}`, steps);
+    const createdItem = await ipcCreate(workspaceId, title, type, metaString);
+    await emitLoomEvent({ type: 'ITEM_CREATED', payload: createdItem });
+    return createdItem;
   }, [workspaceId]);
 
   const updateMeta = useCallback(async (id: string, meta: any) => {
+    assertNotFrozen("Update Item Metadata");
     const payload = typeof meta === "string" ? meta : JSON.stringify(meta);
-    const itemInStore = items.find(x => x.id === id);
-    const prevMetadata = itemInStore ? itemInStore.metadata : "{}";
-    let updatedItem: Item | null = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Update Item Metadata",
-        execute: async () => {
-          updatedItem = await ipcUpdateMeta(id, payload);
-          await verifyIntegrity(id, true);
-          return updatedItem;
-        },
-        rollback: async () => {
-          await ipcUpdateMeta(id, prevMetadata);
-        }
-      },
-      {
-        name: "Emit Update Meta Event",
-        execute: async () => {
-          if (updatedItem) {
-            await emitLoomEvent({ type: 'ITEM_UPDATED', payload: updatedItem });
-          }
-          return updatedItem;
-        },
-        rollback: async () => {
-          if (itemInStore) {
-            const rolledBackItem = { ...itemInStore, metadata: prevMetadata };
-            await emitLoomEvent({ type: 'ITEM_UPDATED', payload: rolledBackItem });
-          }
-        }
-      }
-    ];
-
-    return await mutationEngine.executeMutation("Update Item Metadata", steps);
-  }, [items]);
+    const updatedItem = await ipcUpdateMeta(id, payload);
+    await emitLoomEvent({ type: 'ITEM_UPDATED', payload: updatedItem });
+    return updatedItem;
+  }, []);
 
   const updateFields = useCallback(async (id: string, title: string, type: string) => {
-    const itemInStore = items.find(x => x.id === id);
-    const prevTitle = itemInStore ? itemInStore.title : "";
-    const prevType = itemInStore ? itemInStore.item_type : type;
-    let updatedItem: Item | null = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Update Item Fields",
-        execute: async () => {
-          updatedItem = await ipcUpdate(id, title, type);
-          await verifyIntegrity(id, true);
-          return updatedItem;
-        },
-        rollback: async () => {
-          await ipcUpdate(id, prevTitle, prevType);
-        }
-      },
-      {
-        name: "Emit Update Fields Event",
-        execute: async () => {
-          if (updatedItem) {
-            await emitLoomEvent({ type: 'ITEM_UPDATED', payload: updatedItem });
-          }
-          return updatedItem;
-        },
-        rollback: async () => {
-          if (itemInStore) {
-            const rolledBackItem = { ...itemInStore, title: prevTitle, item_type: prevType };
-            await emitLoomEvent({ type: 'ITEM_UPDATED', payload: rolledBackItem });
-          }
-        }
-      }
-    ];
-
-    return await mutationEngine.executeMutation("Update Item Fields", steps);
-  }, [items]);
+    assertNotFrozen("Update Item Fields");
+    const updatedItem = await ipcUpdate(id, title, type);
+    await emitLoomEvent({ type: 'ITEM_UPDATED', payload: updatedItem });
+    return updatedItem;
+  }, []);
 
   const remove = useCallback(async (id: string) => {
     const itemInStore = items.find(x => x.id === id);
-    const itemLinks = links.filter((l) => l.source_id === id || l.target_id === id);
     if (!itemInStore) return;
-
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Delete Item",
-        execute: async () => {
-          await ipcDelete(id);
-          await verifyIntegrity(id, false);
-        },
-        rollback: async () => {
-          await ipcRestoreSnapshot(itemInStore, itemLinks);
-        }
-      },
-      {
-        name: "Emit Deletion Event",
-        execute: async () => {
-          await emitLoomEvent({ type: 'ITEM_DELETED', payload: { id } });
-        },
-        rollback: async () => {
-          await emitLoomEvent({ type: 'ITEM_RESTORED', payload: { item: itemInStore, links: itemLinks } });
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Delete Item", steps);
-  }, [items, links]);
+    assertNotFrozen("Delete Item");
+    await ipcDelete(id);
+    await emitLoomEvent({ type: 'ITEM_DELETED', payload: { id } });
+  }, [items]);
 
   const restore = useCallback(async (item: Item, linksToRestore: Link[]) => {
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Restore Snapshot",
-        execute: async () => {
-          await ipcRestoreSnapshot(item, linksToRestore);
-          await verifyIntegrity(item.id, true);
-        },
-        rollback: async () => {
-          await ipcDelete(item.id);
-        }
-      },
-      {
-        name: "Emit Restoration Event",
-        execute: async () => {
-          await emitLoomEvent({ type: 'ITEM_RESTORED', payload: { item, links: linksToRestore } });
-        },
-        rollback: async () => {
-          await emitLoomEvent({ type: 'ITEM_DELETED', payload: { id: item.id } });
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Restore Snapshot", steps);
+    assertNotFrozen("Restore Snapshot");
+    await ipcRestoreSnapshot(item, linksToRestore);
+    await emitLoomEvent({ type: 'ITEM_RESTORED', payload: { item, links: linksToRestore } });
   }, []);
 
   const link = useCallback(async (a: string, b: string) => {
     if (a === b) return;
-    let createdLinkRow: Link | null = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Create Link",
-        execute: async () => {
-          createdLinkRow = await createLink(a, b, REL);
-          return createdLinkRow;
-        },
-        rollback: async () => {
-          await deleteLink(a, b, REL);
-        }
-      },
-      {
-        name: "Emit Link Created Event",
-        execute: async () => {
-          if (createdLinkRow) {
-            await emitLoomEvent({ type: 'LINK_CREATED', payload: createdLinkRow });
-          }
-        },
-        rollback: async () => {
-          await emitLoomEvent({ type: 'LINK_DELETED', payload: { source_id: a, target_id: b, relationship_type: REL } });
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Create Link", steps);
+    assertNotFrozen("Create Link");
+    const createdLinkRow = await createLink(a, b, REL);
+    await emitLoomEvent({ type: 'LINK_CREATED', payload: createdLinkRow });
   }, []);
 
   const unlink = useCallback(async (a: string, b: string) => {
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Delete Link",
-        execute: async () => {
-          await deleteLink(a, b, REL);
-        },
-        rollback: async () => {
-          await createLink(a, b, REL);
-        }
-      },
-      {
-        name: "Emit Link Deleted Event",
-        execute: async () => {
-          await emitLoomEvent({ type: 'LINK_DELETED', payload: { source_id: a, target_id: b, relationship_type: REL } });
-        },
-        rollback: async () => {
-          const l = { source_id: a, target_id: b, relationship_type: REL, created_at: new Date().toISOString() };
-          await emitLoomEvent({ type: 'LINK_CREATED', payload: l });
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Delete Link", steps);
+    assertNotFrozen("Delete Link");
+    await deleteLink(a, b, REL);
+    await emitLoomEvent({ type: 'LINK_DELETED', payload: { source_id: a, target_id: b, relationship_type: REL } });
   }, []);
 
   const map = useMemo(() => {
@@ -618,31 +444,10 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
 
   const saveDashboard = useCallback(async (widgets: DashboardWidget[]) => {
     if (!workspaceId) return;
-    const prevWidgets = [...dashboardWidgets];
-
-    const steps: MutationStep[] = [
-      {
-        name: "SQLite Save Dashboard Layout",
-        execute: async () => {
-          await saveDashboardLayout(workspaceId, widgets);
-        },
-        rollback: async () => {
-          await saveDashboardLayout(workspaceId, prevWidgets);
-        }
-      },
-      {
-        name: "Emit Dashboard Updated Event",
-        execute: async () => {
-          await emitLoomEvent({ type: 'DASHBOARD_UPDATED', payload: widgets });
-        },
-        rollback: async () => {
-          await emitLoomEvent({ type: 'DASHBOARD_UPDATED', payload: prevWidgets });
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Save Dashboard Layout", steps);
-  }, [workspaceId, dashboardWidgets]);
+    assertNotFrozen("Save Dashboard Layout");
+    await saveDashboardLayout(workspaceId, widgets);
+    await emitLoomEvent({ type: 'DASHBOARD_UPDATED', payload: widgets });
+  }, [workspaceId]);
 
   const value: ItemStoreType = { workspaceId, ready, items, links, isVaultUnlocked, resolve, create, updateMeta, updateFields, remove, restore, link, unlink, refresh, error, dashboardWidgets, saveDashboard };
   return <ItemStoreCtx.Provider value={value}>{children}</ItemStoreCtx.Provider>;
@@ -729,198 +534,78 @@ export function useFiles() {
   }, [fileEntries]);
 
   const create = useCallback(async (title: string, meta?: any) => {
+    assertNotFrozen("Create File");
     const ext = meta?.ext || null;
     const folder = meta?.folder || "Unfiled";
-    let createdFile: any = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Create File",
-        execute: async () => {
-          createdFile = await fsCreateFile(store.workspaceId!, title, ext, folder);
-          await verifyIntegrity(createdFile.id, true);
-          return createdFile;
-        },
-        rollback: async () => {
-          if (createdFile) {
-            await fsDeleteFile(createdFile.id);
-          }
-        }
-      },
-      {
-        name: "Emit File Creation Event",
-        execute: async () => {
-          if (createdFile) {
-            const itemPayload = {
-              id: createdFile.id,
-              workspace_id: createdFile.workspace_id,
-              item_type: createdFile.item_type,
-              title: createdFile.title,
-              created_at: String(createdFile.modified_at),
-              user_pinned: false,
-              user_size_preference: null,
-              metadata: JSON.stringify({
-                folder,
-                ext: (createdFile.extension || "").toUpperCase(),
-                size: createdFile.size_bytes ? (createdFile.size_bytes / 1024).toFixed(1) + " KB" : "—",
-                updated: "Just now",
-                color: "var(--h-files)",
-                icon: "ph-file",
-                path: createdFile.path,
-                filename: createdFile.filename
-              })
-            };
-            await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
-          }
-          return createdFile;
-        },
-        rollback: async () => {
-          if (createdFile) {
-            await emit("loom://event", { type: 'ITEM_DELETED', payload: { id: createdFile.id } });
-          }
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Create File", steps);
+    const createdFile = await fsCreateFile(store.workspaceId!, title, ext, folder);
+    const itemPayload = {
+      id: createdFile.id,
+      workspace_id: createdFile.workspace_id,
+      item_type: createdFile.item_type,
+      title: createdFile.title,
+      created_at: String(createdFile.modified_at),
+      user_pinned: false,
+      user_size_preference: null,
+      metadata: JSON.stringify({
+        folder,
+        ext: (createdFile.extension || "").toUpperCase(),
+        size: createdFile.size_bytes ? (createdFile.size_bytes / 1024).toFixed(1) + " KB" : "—",
+        updated: "Just now",
+        color: "var(--h-files)",
+        icon: "ph-file",
+        path: createdFile.path,
+        filename: createdFile.filename
+      })
+    };
+    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
     return items.find(i => i.id === createdFile?.id) || items[0];
   }, [store, items]);
 
   const remove = useCallback(async (id: string) => {
-    const itemInStore = store.items.find(x => x.id === id);
-    const itemLinks = store.links.filter((l) => l.source_id === id || l.target_id === id);
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Delete File",
-        execute: async () => {
-          await fsDeleteFile(id);
-          await verifyIntegrity(id, false);
-        },
-        rollback: async () => {
-          if (itemInStore) {
-            await ipcRestoreSnapshot(itemInStore, itemLinks);
-          }
-        }
-      },
-      {
-        name: "Emit File Deletion Event",
-        execute: async () => {
-          await emit("loom://event", { type: 'ITEM_DELETED', payload: { id } });
-        },
-        rollback: async () => {
-          if (itemInStore) {
-            await emit("loom://event", { type: 'ITEM_RESTORED', payload: { item: itemInStore, links: itemLinks } });
-          }
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Delete File", steps);
+    assertNotFrozen("Delete File");
+    await fsDeleteFile(id);
+    await emit("loom://event", { type: 'ITEM_DELETED', payload: { id } });
     await store.refresh();
   }, [store]);
 
   const updateFields = useCallback(async (id: string, title: string) => {
-    const fileItem = store.items.find(x => x.id === id);
-    const prevTitle = fileItem ? fileItem.title : "";
-    let renamedFile: any = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Rename File",
-        execute: async () => {
-          await fsRenameFile(id, title);
-          await verifyIntegrity(id, true);
-          const wsItems = await getItems(store.workspaceId!);
-          renamedFile = wsItems.find(x => x.id === id);
-          return renamedFile;
-        },
-        rollback: async () => {
-          if (prevTitle) {
-            await fsRenameFile(id, prevTitle);
-          }
-        }
-      },
-      {
-        name: "Emit File Rename Event",
-        execute: async () => {
-          if (renamedFile) {
-            await emit("loom://event", { type: 'ITEM_UPDATED', payload: renamedFile });
-          }
-          return renamedFile;
-        },
-        rollback: async () => {
-          if (fileItem && prevTitle) {
-            const rolledBack = { ...fileItem, title: prevTitle };
-            await emit("loom://event", { type: 'ITEM_UPDATED', payload: rolledBack });
-          }
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Rename File", steps);
+    assertNotFrozen("Rename File");
+    await fsRenameFile(id, title);
+    const wsItems = await getItems(store.workspaceId!);
+    const renamedFile = wsItems.find(x => x.id === id);
+    if (renamedFile) await emit("loom://event", { type: 'ITEM_UPDATED', payload: renamedFile });
     await store.refresh();
     return items.find(i => i.id === id) || items[0];
   }, [store, items]);
 
   const importFile = useCallback(async (sourcePath: string, strategy: "copy" | "reference") => {
-    let importedFile: any = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Import File",
-        execute: async () => {
-          importedFile = await fsImportFile(store.workspaceId!, sourcePath, strategy);
-          await verifyIntegrity(importedFile.id, true);
-          return importedFile;
-        },
-        rollback: async () => {
-          if (importedFile) {
-            await fsDeleteFile(importedFile.id);
-          }
-        }
-      },
-      {
-        name: "Emit File Import Event",
-        execute: async () => {
-          if (importedFile) {
-            const filename = sourcePath.split(/[\/\\]/).pop() || "file";
-            const ext = filename.split(".").pop()?.toUpperCase() || "—";
-            const itemPayload = {
-              id: importedFile.id,
-              workspace_id: importedFile.workspace_id,
-              item_type: "file",
-              title: filename.replace(/\.[^/.]+$/, ""),
-              created_at: String(Date.now()),
-              user_pinned: false,
-              user_size_preference: null,
-              metadata: JSON.stringify({
-                folder: "Unfiled",
-                ext,
-                size: "—",
-                updated: "Just now",
-                color: "var(--h-files)",
-                icon: "ph-file",
-                path: importedFile.path,
-                filename
-              })
-            };
-            await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
-          }
-          return importedFile;
-        },
-        rollback: async () => {
-          if (importedFile) {
-            await emit("loom://event", { type: 'ITEM_DELETED', payload: { id: importedFile.id } });
-          }
-        }
-      }
-    ];
-
-    const res = await mutationEngine.executeMutation("Import File", steps);
+    assertNotFrozen("Import File");
+    const importedFile = await fsImportFile(store.workspaceId!, sourcePath, strategy);
+    const filename = sourcePath.split(/[\/\\]/).pop() || "file";
+    const ext = filename.split(".").pop()?.toUpperCase() || "—";
+    const itemPayload = {
+      id: importedFile.id,
+      workspace_id: importedFile.workspace_id,
+      item_type: "file",
+      title: filename.replace(/\.[^/.]+$/, ""),
+      created_at: String(Date.now()),
+      user_pinned: false,
+      user_size_preference: null,
+      metadata: JSON.stringify({
+        folder: "Unfiled",
+        ext,
+        size: "—",
+        updated: "Just now",
+        color: "var(--h-files)",
+        icon: "ph-file",
+        path: importedFile.path,
+        filename
+      })
+    };
+    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
-    return res;
+    return importedFile;
   }, [store]);
 
   return {
@@ -987,193 +672,73 @@ export function useNotes() {
   }, [fileEntries, store.items]);
 
   const create = useCallback(async (title: string, _meta?: any) => {
-    let createdNote: any = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Create Note",
-        execute: async () => {
-          createdNote = await fsCreateNote(store.workspaceId!, title);
-          await verifyIntegrity(createdNote.id, true);
-          return createdNote;
-        },
-        rollback: async () => {
-          if (createdNote) {
-            await fsDeleteFile(createdNote.id);
-          }
-        }
-      },
-      {
-        name: "Emit Note Creation Event",
-        execute: async () => {
-          if (createdNote) {
-            const itemPayload = {
-              id: createdNote.id,
-              workspace_id: createdNote.workspace_id,
-              item_type: "note",
-              title: createdNote.title,
-              created_at: String(createdNote.modified_at),
-              user_pinned: false,
-              user_size_preference: null,
-              metadata: JSON.stringify({
-                folder: "Notes",
-                preview: "Empty note.",
-                words: 0,
-                tag: "",
-                body: [],
-                path: createdNote.path,
-                filename: createdNote.filename
-              })
-            };
-            await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
-          }
-          return createdNote;
-        },
-        rollback: async () => {
-          if (createdNote) {
-            await emit("loom://event", { type: 'ITEM_DELETED', payload: { id: createdNote.id } });
-          }
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Create Note", steps);
+    assertNotFrozen("Create Note");
+    const createdNote = await fsCreateNote(store.workspaceId!, title);
+    const itemPayload = {
+      id: createdNote.id,
+      workspace_id: createdNote.workspace_id,
+      item_type: "note",
+      title: createdNote.title,
+      created_at: String(createdNote.modified_at),
+      user_pinned: false,
+      user_size_preference: null,
+      metadata: JSON.stringify({
+        folder: "Notes",
+        preview: "Empty note.",
+        words: 0,
+        tag: "",
+        body: [],
+        path: createdNote.path,
+        filename: createdNote.filename
+      })
+    };
+    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
     return items.find(i => i.id === createdNote?.id) || items[0];
   }, [store, items]);
 
   const remove = useCallback(async (id: string) => {
-    const itemInStore = store.items.find(x => x.id === id);
-    const itemLinks = store.links.filter((l) => l.source_id === id || l.target_id === id);
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Delete Note",
-        execute: async () => {
-          await fsDeleteFile(id);
-          await verifyIntegrity(id, false);
-        },
-        rollback: async () => {
-          if (itemInStore) {
-            await ipcRestoreSnapshot(itemInStore, itemLinks);
-          }
-        }
-      },
-      {
-        name: "Emit Note Deletion Event",
-        execute: async () => {
-          await emit("loom://event", { type: 'ITEM_DELETED', payload: { id } });
-        },
-        rollback: async () => {
-          if (itemInStore) {
-            await emit("loom://event", { type: 'ITEM_RESTORED', payload: { item: itemInStore, links: itemLinks } });
-          }
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Delete Note", steps);
+    assertNotFrozen("Delete Note");
+    await fsDeleteFile(id);
+    await emit("loom://event", { type: 'ITEM_DELETED', payload: { id } });
     await store.refresh();
   }, [store]);
 
   const updateFields = useCallback(async (id: string, title: string) => {
-    const noteItem = store.items.find(x => x.id === id);
-    const prevTitle = noteItem ? noteItem.title : "";
-    let renamedNote: any = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Rename Note",
-        execute: async () => {
-          await fsRenameFile(id, title);
-          await verifyIntegrity(id, true);
-          const wsItems = await getItems(store.workspaceId!);
-          renamedNote = wsItems.find(x => x.id === id);
-          return renamedNote;
-        },
-        rollback: async () => {
-          if (prevTitle) {
-            await fsRenameFile(id, prevTitle);
-          }
-        }
-      },
-      {
-        name: "Emit Note Rename Event",
-        execute: async () => {
-          if (renamedNote) {
-            await emit("loom://event", { type: 'ITEM_UPDATED', payload: renamedNote });
-          }
-          return renamedNote;
-        },
-        rollback: async () => {
-          if (noteItem && prevTitle) {
-            const rolledBack = { ...noteItem, title: prevTitle };
-            await emit("loom://event", { type: 'ITEM_UPDATED', payload: rolledBack });
-          }
-        }
-      }
-    ];
-
-    await mutationEngine.executeMutation("Rename Note", steps);
+    assertNotFrozen("Rename Note");
+    await fsRenameFile(id, title);
+    const wsItems = await getItems(store.workspaceId!);
+    const renamedNote = wsItems.find(x => x.id === id);
+    if (renamedNote) await emit("loom://event", { type: 'ITEM_UPDATED', payload: renamedNote });
     await store.refresh();
     return items.find(i => i.id === id) || items[0];
   }, [store, items]);
 
   const importNote = useCallback(async (sourcePath: string) => {
-    let importedNote: any = null;
-
-    const steps: MutationStep[] = [
-      {
-        name: "FS Import Note",
-        execute: async () => {
-          importedNote = await fsImportNoteFile(store.workspaceId!, sourcePath);
-          await verifyIntegrity(importedNote.id, true);
-          return importedNote;
-        },
-        rollback: async () => {
-          if (importedNote) {
-            await fsDeleteFile(importedNote.id);
-          }
-        }
-      },
-      {
-        name: "Emit Note Import Event",
-        execute: async () => {
-          if (importedNote) {
-            const filename = sourcePath.split(/[\/\\]/).pop() || "note";
-            const itemPayload = {
-              id: importedNote.id,
-              workspace_id: importedNote.workspace_id,
-              item_type: "note",
-              title: filename.replace(/\.[^/.]+$/, ""),
-              created_at: String(Date.now()),
-              user_pinned: false,
-              user_size_preference: null,
-              metadata: JSON.stringify({
-                folder: "Notes",
-                preview: "Imported note.",
-                words: 0,
-                tag: "",
-                body: [],
-                path: importedNote.path,
-                filename
-              })
-            };
-            await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
-          }
-          return importedNote;
-        },
-        rollback: async () => {
-          if (importedNote) {
-            await emit("loom://event", { type: 'ITEM_DELETED', payload: { id: importedNote.id } });
-          }
-        }
-      }
-    ];
-
-    const res = await mutationEngine.executeMutation("Import Note", steps);
+    assertNotFrozen("Import Note");
+    const importedNote = await fsImportNoteFile(store.workspaceId!, sourcePath);
+    const filename = sourcePath.split(/[\/\\]/).pop() || "note";
+    const itemPayload = {
+      id: importedNote.id,
+      workspace_id: importedNote.workspace_id,
+      item_type: "note",
+      title: filename.replace(/\.[^/.]+$/, ""),
+      created_at: String(Date.now()),
+      user_pinned: false,
+      user_size_preference: null,
+      metadata: JSON.stringify({
+        folder: "Notes",
+        preview: "Imported note.",
+        words: 0,
+        tag: "",
+        body: [],
+        path: importedNote.path,
+        filename
+      })
+    };
+    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
-    return res;
+    return importedNote;
   }, [store]);
 
   return {

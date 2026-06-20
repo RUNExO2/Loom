@@ -441,6 +441,11 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   // Enhancements 11, 12 State
   const [showHistory, setShowHistory] = useState(false);
 
+  // Find-in-note (Ctrl+F) — uses the WebView's native window.find, scoped by
+  // seeding the selection into the note body first.
+  const [find, setFind] = useState<{ open: boolean; q: string }>({ open: false, q: "" });
+  const findInputRef = useRef<HTMLInputElement>(null);
+
   // Graph state
   const [showGraph, setShowGraph] = useState(false);
   const [showFilterPanel, setShowFilterPanel] = useState(false);
@@ -449,16 +454,45 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   const [graphPhysics, setGraphPhysics] = useState<GraphPhysics>({ repulsion: 200, attraction: 0.1, gravity: 0.05 });
 
   useEffect(() => {
-    // Load Mermaid.js for enhancement 9
-    if (!document.getElementById("mermaid-script")) {
-      const script = document.createElement("script");
-      script.id = "mermaid-script";
-      script.src = "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js";
-      script.async = true;
-      script.onload = () => (window as any).mermaid?.initialize({ startOnLoad: false, theme: "dark" });
-      document.body.appendChild(script);
+    // Mermaid is bundled locally (offline-first) and lazy-loaded as its own chunk —
+    // ~3MB, so it only downloads the first time a notes view mounts, not at startup.
+    // Cached on window.mermaid so the render sites below stay unchanged.
+    if (!(window as any).mermaid) {
+      import("mermaid").then((m) => {
+        const mermaid = m.default;
+        mermaid.initialize({ startOnLoad: false, theme: "dark" });
+        (window as any).mermaid = mermaid;
+      }).catch((e) => console.error("Mermaid load failed:", e));
     }
   }, []);
+
+  // Ctrl+F opens the find bar while a note is open; Escape closes it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && activeId) {
+        e.preventDefault();
+        setFind((f) => ({ ...f, open: true }));
+        setTimeout(() => findInputRef.current?.select(), 0);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeId]);
+
+  // ponytail: native window.find — works in the Chromium WebView. Seeds the caret at
+  // the note body so the first match is in the note, not the sidebar. Upgrade path:
+  // CSS Custom Highlight API for in-place highlight-all if a count/next-prev is wanted.
+  const runFind = (query: string, backwards = false) => {
+    if (!query) return;
+    const body = document.querySelector(".note-editor-body");
+    if (body && !backwards) {
+      const sel = window.getSelection();
+      const r = document.createRange();
+      r.setStart(body, 0); r.collapse(true);
+      sel?.removeAllRanges(); sel?.addRange(r);
+    }
+    (window as any).find?.(query, false, backwards, true);
+  };
 
   const togglePin = async (e: React.MouseEvent, note: Item) => {
     e.stopPropagation();
@@ -469,6 +503,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 
   const editorApiRef = useRef<NoteEditorApi | null>(null);
   const autosaveTimer = useRef<any>(null);
+  const lastSavedHtml = useRef<string | null>(null); // no-op-skip guard: skip disk write when content unchanged
 
   // Default selection
   useEffect(() => {
@@ -501,6 +536,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
       readNoteContent(activeNoteMeta.path)
         .then((html) => {
           setContentHtml(html);
+          lastSavedHtml.current = html; // loaded content is the on-disk baseline; editing back to it is a no-op
           setAiSummary(null);
           setIsEditing(false);
           // Enhancement 9: Render Mermaid diagrams after load
@@ -546,8 +582,10 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 
   const saveContent = async (html: string) => {
     if (!activeNote || !activeNoteMeta?.path) return;
+    if (html === lastSavedHtml.current) return; // no-op skip: nothing changed since last write
     try {
       await writeNoteContent(activeNote.id, html);
+      lastSavedHtml.current = html;
       // update SQLite metadata cache
       const tempDiv = document.createElement("div");
       tempDiv.innerHTML = html;
@@ -1009,7 +1047,28 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
             <div style={{ display: "flex", gap: 32, alignItems: "flex-start", marginTop: 24 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h1 style={{ marginTop: 0 }}>{activeNote.title}</h1>
-                
+
+                {find.open && (
+                  <div className="row gap6" style={{ position: "sticky", top: 8, zIndex: 20, marginBottom: 8, padding: 6, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", boxShadow: "var(--shadow-md)", width: "fit-content" }}>
+                    <I n="ph-magnifying-glass" />
+                    <input
+                      ref={findInputRef}
+                      placeholder="Find in note…"
+                      value={find.q}
+                      onChange={(e) => setFind((f) => ({ ...f, q: e.target.value }))}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); runFind(find.q, e.shiftKey); }
+                        else if (e.key === "Escape") { e.preventDefault(); setFind({ open: false, q: "" }); }
+                      }}
+                      style={{ background: "transparent", border: "none", outline: "none", color: "var(--text)", width: 200 }}
+                      autoFocus
+                    />
+                    <button className="btn icon sm" title="Previous (Shift+Enter)" onClick={() => runFind(find.q, true)}><I n="ph-arrow-up" /></button>
+                    <button className="btn icon sm" title="Next (Enter)" onClick={() => runFind(find.q, false)}><I n="ph-arrow-down" /></button>
+                    <button className="btn icon sm" title="Close (Esc)" onClick={() => setFind({ open: false, q: "" })}><I n="ph-x" /></button>
+                  </div>
+                )}
+
                 {isEditing ? (
               <>
                 {aiSummary && (
@@ -1936,7 +1995,7 @@ export function VaultModule() {
               className="btn sm danger"
               type="button"
               onClick={async () => {
-                const confirmDelete = window.confirm(`Are you sure you want to delete ${item.title}?`);
+                const confirmDelete = await modal.confirm({ title: "Delete item", message: `Are you sure you want to delete “${item.title}”?`, icon: "ph-trash", danger: true, confirmLabel: "Delete" });
                 if (confirmDelete) {
                   try {
                     const itemLinks = links.filter((l) => l.source_id === item.id || l.target_id === item.id);

@@ -5,7 +5,7 @@ use tauri::{Manager, State};
 
 pub(crate) fn execute_two_phase<F, R>(conn: &mut rusqlite::Connection, cmd_type: &str, payload: &str, apply: F) -> Result<R, String>
 where
-    F: FnOnce(&rusqlite::Transaction) -> Result<R, String>,
+    F: FnOnce(&rusqlite::Connection) -> Result<R, String>,
 {
     let id = uuid::Uuid::new_v4().to_string();
 
@@ -23,8 +23,12 @@ where
         [&id, cmd_type, payload],
     ).map_err(|e| e.to_string())?;
 
-    // Phase 2: Apply
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Phase 2: Apply.
+    // ponytail: SAVEPOINT, not BEGIN, so this is re-entrant. At the top level a
+    // savepoint behaves like a transaction (commits on RELEASE); nested inside an
+    // open savepoint (e.g. an automation run) it just nests instead of erroring
+    // with "cannot start a transaction within a transaction".
+    let tx = conn.savepoint().map_err(|e| e.to_string())?;
     let result = match apply(&tx) {
         Ok(r) => r,
         Err(e) => {

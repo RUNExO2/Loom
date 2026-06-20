@@ -260,7 +260,7 @@ pub(crate) fn capture_snapshot(
 
 // Re-apply a captured payload to the live tables. Caller runs this inside a
 // transaction (execute_two_phase) so the whole rollback is atomic.
-fn apply_snapshot(tx: &rusqlite::Transaction, ws: &str, payload: &SnapshotPayload) -> Result<(), String> {
+fn apply_snapshot(tx: &rusqlite::Connection, ws: &str, payload: &SnapshotPayload) -> Result<(), String> {
     use std::collections::HashSet;
     let snap_ids: HashSet<&str> = payload.items.iter().map(|i| i.id.as_str()).collect();
 
