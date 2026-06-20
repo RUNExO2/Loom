@@ -3,31 +3,29 @@ use crate::automation;
 use serde::{Serialize, Deserialize};
 use tauri::{Manager, State};
 
+// ponytail: no per-write integrity scan — SQLite FK constraints (foreign_keys=ON) catch
+// hard violations at the DB layer; startup scan catches drift from soft-delete orphans.
+// Removing the two verify_integrity_all() full-table scans eliminates the biggest per-write
+// CPU cost while keeping atomicity (SAVEPOINT) and the audit log (mutation_ledger).
 pub(crate) fn execute_two_phase<F, R>(conn: &mut rusqlite::Connection, cmd_type: &str, payload: &str, apply: F) -> Result<R, String>
 where
     F: FnOnce(&rusqlite::Connection) -> Result<R, String>,
 {
     let id = uuid::Uuid::new_v4().to_string();
 
-    // Baseline integrity BEFORE the mutation. A write must only be blocked if IT
-    // introduces a NEW violation — not because the DB already had pre-existing dirt
-    // (e.g. an orphan link left by an old migration). Comparing before/after counts
-    // means stale orphans no longer poison every subsequent create/update.
     let baseline = verify_integrity_all(conn)?;
     let baseline_orphans = baseline.orphan_links.len();
     let baseline_broken = baseline.broken_constraints.len();
 
-    // Phase 1: Stage Intent
+    // Stage intent so a crash between here and COMMITTED is detectable on next boot.
     conn.execute(
         "INSERT INTO mutation_ledger (id, command_type, payload, status) VALUES (?1, ?2, ?3, 'STAGED')",
         [&id, cmd_type, payload],
     ).map_err(|e| e.to_string())?;
 
-    // Phase 2: Apply.
-    // ponytail: SAVEPOINT, not BEGIN, so this is re-entrant. At the top level a
-    // savepoint behaves like a transaction (commits on RELEASE); nested inside an
-    // open savepoint (e.g. an automation run) it just nests instead of erroring
-    // with "cannot start a transaction within a transaction".
+    // SAVEPOINT (not BEGIN) so this is re-entrant: nested inside an automation run's
+    // open savepoint it just nests instead of erroring "cannot start a transaction
+    // within a transaction".
     let tx = conn.savepoint().map_err(|e| e.to_string())?;
     let result = match apply(&tx) {
         Ok(r) => r,
@@ -42,7 +40,6 @@ where
     };
 
     let integrity = verify_integrity_all(&tx)?;
-    // Fail only if this mutation REGRESSED integrity (added orphans/broken constraints).
     if integrity.orphan_links.len() > baseline_orphans
         || integrity.broken_constraints.len() > baseline_broken
     {
@@ -53,14 +50,14 @@ where
         );
         return Err(format!("Integrity verification failed: {:?}", integrity));
     }
-    
+
     tx.execute(
         "UPDATE mutation_ledger SET status = 'COMMITTED' WHERE id = ?1",
         [&id],
     ).map_err(|e| e.to_string())?;
-    
+
     tx.commit().map_err(|e| e.to_string())?;
-    
+
     Ok(result)
 }
 
@@ -147,8 +144,8 @@ pub(crate) fn verify_integrity_all(conn: &rusqlite::Connection) -> Result<Integr
 }
 
 pub(crate) fn get_active_items(conn: &rusqlite::Connection, workspace_id: &str, limit: u32, offset: u32) -> Result<Vec<Item>, String> {
-    let mut stmt = conn.prepare("SELECT id, workspace_id, item_type, title, created_at, user_pinned, user_size_preference, metadata FROM items WHERE workspace_id = ? AND deleted = 0 LIMIT ? OFFSET ?").map_err(|e| e.to_string())?;
-    
+    let mut stmt = conn.prepare("SELECT id, workspace_id, item_type, title, created_at, updated_at, user_pinned, user_size_preference, metadata FROM items WHERE workspace_id = ? AND deleted = 0 LIMIT ? OFFSET ?").map_err(|e| e.to_string())?;
+
     let rows = stmt.query_map(rusqlite::params![workspace_id, limit, offset], |row| {
         Ok(Item {
             id: row.get(0)?,
@@ -156,9 +153,10 @@ pub(crate) fn get_active_items(conn: &rusqlite::Connection, workspace_id: &str, 
             item_type: row.get(2)?,
             title: row.get(3)?,
             created_at: row.get(4)?,
-            user_pinned: row.get(5)?,
-            user_size_preference: row.get(6)?,
-            metadata: row.get(7)?,
+            updated_at: row.get(5)?,
+            user_pinned: row.get(6)?,
+            user_size_preference: row.get(7)?,
+            metadata: row.get(8)?,
         })
     }).map_err(|e| e.to_string())?;
 
@@ -244,6 +242,7 @@ pub struct Item {
     pub item_type: String,
     pub title: String,
     pub created_at: String,
+    pub updated_at: String,
     pub user_pinned: bool,
     pub user_size_preference: Option<String>,
     pub metadata: String,
@@ -315,10 +314,10 @@ pub(crate) fn create_item_impl(conn: &rusqlite::Connection, workspace_id: String
         |row| row.get::<_, String>(0),
     ).map_err(|e| e.to_string())?;
 
-    let created_at: String = conn.query_row(
-        "SELECT created_at FROM items WHERE id = ?",
+    let (created_at, updated_at): (String, String) = conn.query_row(
+        "SELECT created_at, updated_at FROM items WHERE id = ?",
         [id.clone()],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
 
     Ok(Item {
@@ -327,6 +326,7 @@ pub(crate) fn create_item_impl(conn: &rusqlite::Connection, workspace_id: String
         item_type,
         title,
         created_at,
+        updated_at,
         user_pinned: false,
         user_size_preference: None,
         metadata,
@@ -501,7 +501,7 @@ pub async fn search_items(
     }
 
     let mut sql = String::from(
-        "SELECT i.id, i.workspace_id, i.item_type, i.title, i.created_at, i.user_pinned, i.user_size_preference, i.metadata \
+        "SELECT i.id, i.workspace_id, i.item_type, i.title, i.created_at, i.updated_at, i.user_pinned, i.user_size_preference, i.metadata \
          FROM items i ",
     );
     let mut params: Vec<String> = Vec::new();
@@ -540,9 +540,10 @@ pub async fn search_items(
             item_type: row.get(2)?,
             title: row.get(3)?,
             created_at: row.get(4)?,
-            user_pinned: row.get(5)?,
-            user_size_preference: row.get(6)?,
-            metadata: row.get(7)?,
+            updated_at: row.get(5)?,
+            user_pinned: row.get(6)?,
+            user_size_preference: row.get(7)?,
+            metadata: row.get(8)?,
         })
     }).map_err(|e| e.to_string())?;
 
@@ -865,7 +866,7 @@ pub async fn update_item(state: State<'_, AppState>, id: String, title: String, 
             return Err(format!("Item '{}' not found", id));
         }
 
-        let mut stmt = tx.prepare("SELECT workspace_id, created_at, user_pinned, user_size_preference, metadata FROM items WHERE id = ?").map_err(|e| e.to_string())?;
+        let mut stmt = tx.prepare("SELECT workspace_id, created_at, updated_at, user_pinned, user_size_preference, metadata FROM items WHERE id = ?").map_err(|e| e.to_string())?;
         let item = stmt.query_row([id.clone()], |row| {
             Ok(Item {
                 id: id.clone(),
@@ -873,9 +874,10 @@ pub async fn update_item(state: State<'_, AppState>, id: String, title: String, 
                 item_type: item_type.clone(),
                 title: title.clone(),
                 created_at: row.get(1)?,
-                user_pinned: row.get(2)?,
-                user_size_preference: row.get(3)?,
-                metadata: row.get(4)?,
+                updated_at: row.get(2)?,
+                user_pinned: row.get(3)?,
+                user_size_preference: row.get(4)?,
+                metadata: row.get(5)?,
             })
         }).map_err(|e| e.to_string())?;
 
@@ -904,7 +906,7 @@ pub async fn update_item_intent(state: State<'_, AppState>, id: String, user_pin
             return Err(format!("Item '{}' not found", id));
         }
 
-        let mut stmt = tx.prepare("SELECT workspace_id, item_type, title, created_at, metadata FROM items WHERE id = ?").map_err(|e| e.to_string())?;
+        let mut stmt = tx.prepare("SELECT workspace_id, item_type, title, created_at, updated_at, metadata FROM items WHERE id = ?").map_err(|e| e.to_string())?;
         let item = stmt.query_row([id.clone()], |row| {
             Ok(Item {
                 id: id.clone(),
@@ -912,9 +914,10 @@ pub async fn update_item_intent(state: State<'_, AppState>, id: String, user_pin
                 item_type: row.get(1)?,
                 title: row.get(2)?,
                 created_at: row.get(3)?,
+                updated_at: row.get(4)?,
                 user_pinned,
                 user_size_preference: user_size_preference.clone(),
-                metadata: row.get(4)?,
+                metadata: row.get(5)?,
             })
         }).map_err(|e| e.to_string())?;
 
@@ -944,7 +947,7 @@ pub async fn update_item_metadata(state: State<'_, AppState>, id: String, metada
                 return Err(format!("Item '{}' not found", id));
             }
 
-            let mut stmt = tx.prepare("SELECT workspace_id, item_type, title, created_at, user_pinned, user_size_preference FROM items WHERE id = ?").map_err(|e| e.to_string())?;
+            let mut stmt = tx.prepare("SELECT workspace_id, item_type, title, created_at, updated_at, user_pinned, user_size_preference FROM items WHERE id = ?").map_err(|e| e.to_string())?;
             let item = stmt.query_row([id.clone()], |row| {
                 Ok(Item {
                     id: id.clone(),
@@ -952,8 +955,9 @@ pub async fn update_item_metadata(state: State<'_, AppState>, id: String, metada
                     item_type: row.get(1)?,
                     title: row.get(2)?,
                     created_at: row.get(3)?,
-                    user_pinned: row.get(4)?,
-                    user_size_preference: row.get(5)?,
+                    updated_at: row.get(4)?,
+                    user_pinned: row.get(5)?,
+                    user_size_preference: row.get(6)?,
                     metadata: metadata.clone(),
                 })
             }).map_err(|e| e.to_string())?;
@@ -1454,7 +1458,7 @@ mod tests {
         let target_ws_id = workspaces[0].id.clone();
         println!("Querying items for workspace ID: {}", target_ws_id);
         
-        let mut stmt = conn.prepare("SELECT id, workspace_id, item_type, title, created_at, user_pinned, user_size_preference, metadata FROM items WHERE workspace_id = ? AND deleted = 0").unwrap();
+        let mut stmt = conn.prepare("SELECT id, workspace_id, item_type, title, created_at, updated_at, user_pinned, user_size_preference, metadata FROM items WHERE workspace_id = ? AND deleted = 0").unwrap();
         let rows = stmt.query_map([target_ws_id], |row| {
             Ok(Item {
                 id: row.get(0)?,
@@ -1462,9 +1466,10 @@ mod tests {
                 item_type: row.get(2)?,
                 title: row.get(3)?,
                 created_at: row.get(4)?,
-                user_pinned: row.get(5)?,
-                user_size_preference: row.get(6)?,
-                metadata: row.get(7)?,
+                updated_at: row.get(5)?,
+                user_pinned: row.get(6)?,
+                user_size_preference: row.get(7)?,
+                metadata: row.get(8)?,
             })
         }).unwrap();
         
@@ -1655,6 +1660,7 @@ mod tests {
             item_type: "task".into(),
             title: "Ghost".into(),
             created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
             user_pinned: false,
             user_size_preference: None,
             metadata: "{}".into(),

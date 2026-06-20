@@ -24,6 +24,7 @@ function item(over: { item_type: string; title?: string; created_at?: string; me
     item_type: over.item_type,
     title: over.title ?? "untitled",
     created_at: over.created_at ?? "2026-06-15 12:00:00",
+    updated_at: over.created_at ?? "2026-06-15 12:00:00",
     user_pinned: false,
     user_size_preference: null,
     metadata: typeof over.metadata === "string" ? over.metadata : JSON.stringify(over.metadata ?? {}),

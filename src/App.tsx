@@ -553,7 +553,7 @@ export function App() {
           {shortcutsOpen && <ShortcutsOverlay key="shortcuts" onClose={() => setShortcutsOpen(false)} />}
         </AnimatePresence>
         <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
-        <SplitBrainVerifier />
+        {import.meta.env.DEV && <SplitBrainVerifier />}
       </div>
       </ActionsCtx.Provider>
     </LoomCtx.Provider>

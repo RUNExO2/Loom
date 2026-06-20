@@ -52,21 +52,12 @@ wedge no cloud incumbent can copy).
 
 ### Includes
 - Add `updated_at` column + migration + triggers
-- Remove MutationEngine completely
-- Remove frontend integrity verification calls
 - Replace full integrity scans with targeted validation
-- Fix automation nested transaction bug
 - Remove SplitBrainVerifier from production
-- Remove unused dependencies
 - Remove dead seed system
-- Remove greet command
-- Memoize navigation/badge computations
 - Remove event-bus roundtrip for local state mutations
 - Add pagination infrastructure
 - Virtualize all large module lists
-- Move Playwright to devDependencies
-- Remove unused Zustand
-- Remove unused React Router
 
 ### Claude Prompt
 > You are performing Phase 1 of a large-scale architectural optimization of LOOM.
@@ -88,16 +79,11 @@ wedge no cloud incumbent can copy).
 > **After implementation:** Produce a migration report listing: files changed, code removed, performance improvements, risk areas, testing performed.
 
 ### ➕ Added from teardown (fits Phase 1)
-- **Event-driven / idle-backoff integrity sweep** — replace the 30s full filesystem+DB sweep in `App.tsx` and widen the 30s scheduler poll. Biggest idle CPU/battery drain. `[D2]`
 - **Move file I/O off the DB thread** in `index_text_files` (read/parse via `tokio::spawn`, batch into SQLite). Stops UI freeze during indexing. `[D3]`
 - **Delta-integrity in `execute_two_phase`** — validate only the mutated rows' endpoints/workspace, not full-table scans ×2 per write. (This *is* the "targeted validation" requirement — make it explicit.) `[D1]`
 - **Incremental store via the mutation-ledger change feed** — complements pagination; avoids full `refresh()` reloads. `[D4][D5]`
-- **Bundle mermaid locally** — kill the runtime CDN fetch (`Modules.tsx`); restores offline-first. `[D7]`
-- **Background engine off by default** + honor `prefers-reduced-motion`; throttle/remove the always-on mousemove parallax listener. `[B22][D13]`
-- **Replace `window.prompt()`/`confirm()`** (NoteEditor link, MediaTools embed) with the existing `modal.form`. Cheap, no behavior change in outcome. `[B1]`
-- **Debounced, no-op-skipping autosave** (content-hash guard) for notes. `[B2]`
 - **Structured error types (`thiserror`)** across the IPC boundary (replace blanket `.map_err(|e| e.to_string())`). `[E5]`
-- **Split `Modules.tsx` / `Modules2.tsx`** into per-module files. `[E6]`
+- ~~**Split `Modules.tsx` / `Modules2.tsx`** into per-module files.~~ `[E6]` ✓
 - **Note:** removing SplitBrainVerifier from production is a *symptom fix*; the *cause* (multi-source state) is resolved in **Phase 5** (single reactive store). Keep the dev-only verifier until then.
 
 ---
@@ -135,8 +121,6 @@ wedge no cloud incumbent can copy).
 ### ➕ Added from teardown (fits Phase 2)
 - **Daily notes / journal** — auto-created "Today" note, default capture target. Core PKM loop. `[A6]`
 - **Templates** (notes/tasks/projects) with `{{date}}`/`{{title}}` variables; `templates.ts` is already nascent. `[A9]`
-- **Find-in-note** `Ctrl+F`. `[B5]`
-- **Quick-switcher** `Ctrl+O` to jump to any item. `[B18]`
 - **Natural-language due dates** ("tomorrow 5pm") reusing the capture parser. `[C18]`
 - **Drag-to-link** between items. `[B8]`
 - **Native `<input type="date">`** pickers for due dates (CSS/native over a lib). `[B11]`
@@ -371,11 +355,7 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 
 | # | Item | Impact | Effort | Phase |
 |---|---|---|---|---|
-|B1|Replace `prompt()`/`confirm()` with modals|High|Easy|1|
-|B2|Debounced no-op-skip autosave|High|Easy|1|
-|B3|Bundle mermaid locally|Medium|Easy|1|
 |B4|Real capture modal (drop DOM hack)|Medium|Easy|2|
-|B5|`Ctrl+F` find-in-note|Medium|Easy|2|
 |B6|Back/forward navigation + view history|Medium|Medium|4|
 |B7|Bulk actions (multi-select)|High|Medium|2 (orig)|
 |B8|Drag-to-link between items|Medium|Medium|2|
@@ -388,11 +368,9 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 |B15|Undo/redo for file & automation ops|Medium|Medium|2|
 |B16|Trash retention + "empty trash"|Medium|Easy|2|
 |B17|Duplicate item / save-as-template|Low|Easy|2|
-|B18|Quick-switcher (`Ctrl+O`)|High|Easy|2|
 |B19|Per-item color/icon picker|Low|Easy|4|
 |B20|Sortable/filterable list columns|Medium|Medium|2|
 |B21|"Open in new window" everywhere|Low|Easy|4|
-|B22|Reduced-motion; background off by default|Medium|Easy|1|
 |B23|Export note to PDF/MD/HTML; theme preview|Low|Easy|4|
 |B24|Link hover previews|Medium|Medium|4|
 |B25|Settings search|Low|Easy|4|
@@ -432,18 +410,14 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 | # | Item | Impact | Effort | Phase |
 |---|---|---|---|---|
 |D1|Delta-integrity vs full scan ×2 per write|High|Hard|1 (orig)|
-|D2|Event-driven/idle integrity sweep|High|Easy|1|
 |D3|File I/O off the DB thread (`index_text_files`)|High|Medium|1|
 |D4|Incremental store via change feed|High|Medium|1|
 |D5|Windowed/paged item store|High|Medium|1 (orig)|
-|D6|Debounced no-op-skip autosave|Medium|Easy|1|
-|D7|Bundle mermaid; remove CDN fetch|Medium|Easy|1|
 |D8|Partial indexes (done) + verify query plans|Medium|Easy|1|
 |D9|Code-split Modules/Modules2 (lazy load)|Medium|Medium|1|
 |D10|Memoize adjacency/graph; rebuild on delta|Medium|Medium|3|
 |D11|Finish virtualizing all long lists|Medium|Medium|1 (orig)|
 |D12|Cache rendered note HTML; skip re-parse|Medium|Medium|1|
-|D13|Throttle/remove mousemove parallax|Low|Easy|1|
 |D14|Batch FTS updates on bulk import|Medium|Medium|1|
 |D15|WAL autocheckpoint tuning + periodic checkpoint|Low|Easy|1|
 |D16|Stream encrypt/decrypt (no full-file read)|Medium|Medium|5|
@@ -466,10 +440,9 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 |E3|Demote per-write global integrity to background|High|Hard|1|
 |E4|Versioned migration framework|Medium|Medium|5|
 |E5|Structured error types (`thiserror`)|Medium|Medium|1|
-|E6|Split Modules/Modules2 per module|Medium|Medium|1|
+|E6|~~Split Modules/Modules2 per module~~|Medium|Medium|1 ✓|
 |E7|Sync-ready model (ids, change log, tombstones)|High|Hard|5|
 |E8|Plugin API boundary (sandboxed)|High|Hard|8|
-|E9|Fix automation SAVEPOINT reentry|High|Medium|1 (orig)|
 |E10|Internal event bus (replace DOM/CustomEvent hacks)|Medium|Medium|1|
 |E11|Content-addressable attachment store|Medium|Medium|5|
 |E12|Repository storage layer (enables sync)|High|Hard|5|
@@ -522,25 +495,13 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 | # | Target | Action | Phase |
 |---|---|---|---|
 |G1|Per-write double `verify_integrity_all`|Redesign → delta/background|1|
-|G2|30s filesystem+DB integrity sweep|Simplify → event-driven/idle|1|
 |G3|Notes-as-HTML|Redesign → Markdown|5|
-|G4|`prompt()`/`confirm()` flows|Replace → modals|1|
 |G5|"Coming soon" greyed nav items|Remove / Labs-gate|1/8|
 |G6|DOM-typing quick-capture hack|Redesign → real modal|2|
 |G7|Split-brain verifier / multi-source state|Simplify → one store + change feed|5|
-|G8|`Modules.tsx` + `Modules2.tsx` mega-files|Refactor per module|1|
-|G9|Ambient/parallax/acrylic background engine|Simplify, default off|1|
-|G10|Mermaid-from-CDN|Replace → bundled|1|
+|G8|~~`Modules.tsx` + `Modules2.tsx` mega-files~~|~~Refactor per module~~|1 ✓|
 
 ## H. Prioritized Roadmap (ROI: high impact / low effort first)
-
-**Phase 0 — Stop the bleeding (days, mostly Easy, high impact).** Fold into the
-start of Phase 1.
-1. Event-driven/idle integrity sweep + widen scheduler `[D2/G2]`.
-2. Replace `prompt()`/`confirm()` with modals `[B1/G4]`; debounced no-op autosave `[B2]`.
-3. Bundle mermaid `[D7/G10]`; background off + reduced-motion `[B22]`.
-4. Hide "Coming soon" modules `[C2/G5]`; Quick-switcher `Ctrl+O` `[B18]`; find-in-note `[B5]`.
-5. **Fix the automation SAVEPOINT bug** `[E9]` — unlocks the whole automation pillar cheaply.
 
 **Phase 1 — Reliability & Scalability** (original Phase 1 + its ➕ additions).
 

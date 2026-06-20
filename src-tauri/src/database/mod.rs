@@ -3,7 +3,7 @@ use rusqlite::{Connection, Result};
 // Current logical schema version. Bump when a structural migration is added below.
 // Tracked via SQLite's PRAGMA user_version so a migration runs at most once and an
 // imported/restored DB can be checked for compatibility.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 // Idempotent "ADD COLUMN" that swallows ONLY the benign "column already exists" case
 // and propagates everything else (locked DB, disk error, syntax) instead of `let _ =`
@@ -34,6 +34,7 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
             item_type TEXT NOT NULL,
             title TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             user_pinned BOOLEAN DEFAULT 0,
             user_size_preference TEXT,
             metadata TEXT DEFAULT '{}',
@@ -284,6 +285,10 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
     add_column(conn, "ALTER TABLE items ADD COLUMN metadata TEXT DEFAULT '{}'")?;
     add_column(conn, "ALTER TABLE items ADD COLUMN deleted BOOLEAN DEFAULT 0")?;
 
+    // Soft-migration: updated_at (v3). Backfilled to created_at for old rows; trigger keeps it current.
+    add_column(conn, "ALTER TABLE items ADD COLUMN updated_at TEXT")?;
+    let _ = conn.execute("UPDATE items SET updated_at = created_at WHERE updated_at IS NULL", []);
+    let _ = conn.execute("UPDATE items SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL", []);
     // Soft-migration: Promote JSON fields
     add_column(conn, "ALTER TABLE items ADD COLUMN status TEXT")?;
     add_column(conn, "ALTER TABLE items ADD COLUMN priority TEXT")?;
@@ -304,6 +309,18 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_active_items ON items(workspace_id, item_type) WHERE deleted = 0", []);
     // Startup ledger sweep + staged-transaction reconciliation both filter by status.
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_status ON mutation_ledger(status)", []);
+    // updated_at index for "recently edited" queries; trigger keeps it current on every write.
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_updated_at ON items(updated_at DESC) WHERE deleted = 0", []);
+    let _ = conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS items_updated_at \
+         AFTER UPDATE ON items FOR EACH ROW \
+         WHEN NEW.updated_at = OLD.updated_at \
+         BEGIN UPDATE items SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; END; \
+         CREATE TRIGGER IF NOT EXISTS items_updated_at_insert \
+         AFTER INSERT ON items FOR EACH ROW \
+         WHEN NEW.updated_at IS NULL \
+         BEGIN UPDATE items SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; END;"
+    );
 
     // Soft-migration: Create the dashboard_widgets table in existing DBs
     let _ = conn.execute(

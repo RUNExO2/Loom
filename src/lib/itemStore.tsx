@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useCallback, useEffect, useMemo, useState } from "react";
-import { listen, emit } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { unfreezeSystem } from "../ipc/settings";
 import { getWorkspaces, createWorkspace } from "../ipc/workspaces";
 import {
@@ -12,9 +12,6 @@ import { buildAdjacency } from "./relations";
 import { TYPE_ICON, TYPE_COLOR } from "./typeMeta";
 import { assertNotFrozen } from "./mutationGuard";
 import { vaultSession } from "./vaultSession";
-// `D` (the mock dataset) is imported ONLY for the one-time empty-DB seed below.
-// It is never read while rendering — the UI reads SQLite through this store.
-import { D } from "../data/loomData";
 
 // ── Authority model ───────────────────────────────────────────────────────────
 // SQLite = truth. This store = the single React render cache over it.
@@ -76,117 +73,6 @@ export const useItemStore = () => {
   return c;
 };
 
-// ── One-time seed of demo content (only when the DB is genuinely empty) ─────────
-// This is NOT a runtime fallback: it writes real rows once, then SQLite is sole truth.
-//
-// Relationships are seeded as REAL rows in the SQLite links table (createLink),
-// NOT as arrays inside metadata. The seed's static ids (e.g. "p-gng") are mapped to
-// the real UUIDs create_item assigns, then every seed-declared edge is materialised
-// as a link row. After this, relations.ts derives all connections from those rows.
-async function _seedAll(wsId: string): Promise<Item[]> {
-  const out: Item[] = [];
-  const idMap = new Map<string, string>();          // seed static id → real UUID
-  const pending: { from: string; to: string[] }[] = []; // edges to materialise after all rows exist
-
-  // staticId may be null for rows nothing links TO (e.g. agenda events).
-  const push = async (staticId: string | null, title: string, type: string, meta: any, links?: string[]) => {
-    const it = await ipcCreate(wsId, title, type, JSON.stringify(meta));
-    out.push(it);
-    if (staticId) idMap.set(staticId, it.id);
-    if (links && links.length) pending.push({ from: it.id, to: links });
-  };
-
-  for (const n of D.notes)
-    await push(n.id, n.title, "note", { preview: n.preview, folder: n.folder, updated: n.updated, words: n.words, tag: n.tag, body: n.body || [] }, n.links);
-
-  for (const t of D.tasks)
-    await push(t.id, t.title, "task", { done: t.done, priority: t.priority, due: t.due, project: t.project }, t.links);
-
-  for (const m of D.media) {
-    let progressTotal = 0;
-    if (m.of && typeof m.of === "string") {
-      const match = m.of.match(/(\d+)/g);
-      if (match && match.length > 0) progressTotal = parseInt(match[match.length - 1], 10);
-    }
-    const currentProgress = progressTotal > 0 ? Math.floor((m.progress / 100) * progressTotal) : m.progress;
-    
-    await push(m.id, m.title, "library", { 
-      mediaType: m.kind as any, 
-      status: m.status, 
-      favorite: false, 
-      notes: "", 
-      tags: m.tag ? [m.tag] : [], 
-      progress: { current: currentProgress, total: progressTotal },
-      tracking: {},
-      color: m.color, 
-      icon: m.icon
-    }, (m as any).links);
-  }
-
-  // Seed agenda relative to today so events always land in the calendar's current week.
-  const today = new Date();
-  for (const a of D.agenda) {
-    const h = parseInt(a.time);
-    const dur = a.sub.includes("2h") ? 2 : 1;
-    const startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), h, 0, 0);
-    const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), h + dur, 0, 0);
-    await push(null, a.title, "calendar", { startDate: startDate.toISOString(), endDate: endDate.toISOString(), allDay: false, description: "", location: "", tags: "", sub: a.sub, color: a.color }, (a as any).links);
-  }
-
-  for (const b of D.bookmarks)
-    await push(b.id, b.title, "bookmark", { url: `https://${b.site || "example.com"}`, createdAt: new Date().toISOString(), tags: [] }, b.links);
-
-  for (const p of D.projects)
-    await push(p.id, p.title, "project", { subtitle: p.subtitle, status: p.status, progress: p.progress, color: p.color, icon: p.icon, tag: p.tag, desc: p.desc, meta: { commits: p.meta.commits, lang: p.meta.lang } }, p.links);
-
-  for (const h of D.habits)
-    await push(h.id, h.title, "habit", { goal: h.goal, streak: h.streak, color: h.color, week: h.week }, h.links);
-
-  for (const f of D.files)
-    await push(f.id, f.title, "file", { folder: f.folder, ext: f.ext, size: f.size, updated: f.updated, color: f.color, icon: f.icon }, f.links);
-
-  for (const v of D.vault)
-    await push(v.id, v.title, "vault", { kind: v.kind, icon: v.icon, color: v.color, updated: v.updated }, v.links);
-
-  for (const a of D.automations)
-    await push(a.id, a.title, "automation",
-      { on: a.on, runs: a.runs, color: a.color, desc: a.desc, chain: [],
-        trigger: (a as any).trigger, conditions: (a as any).conditions ?? null, actions: (a as any).actions ?? [] },
-      a.links);
-
-  // Materialise every edge as a real link row. Targets that aren't seeded as items
-  // (e.g. timeline ids) are simply skipped. Undirected dedupe so each pair is one row.
-  const seen = new Set<string>();
-  for (const { from, to } of pending) {
-    for (const targetStatic of to) {
-      const target = idMap.get(targetStatic);
-      if (!target || target === from) continue;
-      const key = [from, target].sort().join("|");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      await createLink(from, target, "related");
-    }
-  }
-
-  return out;
-}
-// noUnusedLocals: _seedAll is intentionally preserved for future use.
-void (null as unknown as typeof _seedAll);
-
-// Vault + automation were added after the original seed. For DBs seeded before they
-// existed, this writes the missing system rows once. Their seed relationships can't be
-// materialised here (the pre-existing rows have unknown real ids), so these rows start
-// unlinked — a full reset re-seeds everything with real link rows.
-async function seedSystemTypes(push: (title: string, type: string, meta: any) => Promise<void>) {
-  for (const v of D.vault)
-    await push(v.title, "vault", { kind: v.kind, icon: v.icon, color: v.color, updated: v.updated });
-
-  for (const a of D.automations)
-    await push(a.title, "automation",
-      { on: a.on, runs: a.runs, color: a.color, desc: a.desc, chain: [],
-        trigger: (a as any).trigger, conditions: (a as any).conditions ?? null, actions: (a as any).actions ?? [] });
-}
-
 export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<Item[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
@@ -204,18 +90,7 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
       const ws = await getWorkspaces();
       const wsId = ws.length === 0 ? (await createWorkspace("Default Workspace")).id : ws[0].id;
       setWorkspaceId(wsId);
-      let loaded = await getItems(wsId);
-      if (loaded.length === 0) {
-        // Database is empty. Seeding is disabled so the app starts as a clean, blank slate.
-        loaded = [];
-      } else if (!loaded.some((i) => i.item_type === "vault" || i.item_type === "automation")) {
-        // DB seeded before system types existed — backfill them once, then reload.
-        const push = async (title: string, type: string, meta: any) => {
-          await ipcCreate(wsId, title, type, JSON.stringify(meta));
-        };
-        await seedSystemTypes(push);
-        loaded = await getItems(wsId);
-      }
+      const loaded = await getItems(wsId);
       setItems(loaded);
       // Phase 7: one batched IPC call for the whole workspace's edges, replacing the
       // old per-item get_links fan-out (N IPC round trips + N unindexed scans).
@@ -242,71 +117,12 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
     
     listen<any>("loom://event", (event) => {
       if (!active) return;
-      const { type, payload } = event.payload;
-      switch (type) {
-        case 'ITEM_CREATED': {
-          setItems((prev) => {
-            if (prev.some((x) => x.id === payload.id)) return prev;
-            return [payload, ...prev];
-          });
-          break;
-        }
-        case 'ITEM_UPDATED': {
-          setItems((prev) => prev.map((x) => (x.id === payload.id ? payload : x)));
-          break;
-        }
-        case 'ITEM_DELETED': {
-          setItems((prev) => prev.filter((x) => x.id !== payload.id));
-          setLinks((prev) => prev.filter((l) => l.source_id !== payload.id && l.target_id !== payload.id));
-          break;
-        }
-        case 'ITEM_RESTORED': {
-          const { item, links: linksToRestore } = payload;
-          setItems((prev) => {
-            if (prev.some((x) => x.id === item.id)) return prev;
-            return [item, ...prev];
-          });
-          if (linksToRestore && linksToRestore.length > 0) {
-            setLinks((prev) => {
-              const next = [...prev];
-              for (const l of linksToRestore) {
-                if (!next.some(x => x.source_id === l.source_id && x.target_id === l.target_id && x.relationship_type === l.relationship_type)) {
-                  next.push(l);
-                }
-              }
-              return next;
-            });
-          }
-          break;
-        }
-        case 'LINK_CREATED': {
-          setLinks((prev) => {
-            if (prev.some((l) => l.source_id === payload.source_id && l.target_id === payload.target_id && l.relationship_type === payload.relationship_type)) return prev;
-            return [...prev, payload];
-          });
-          break;
-        }
-        case 'LINK_DELETED': {
-          const { source_id, target_id, relationship_type } = payload;
-          setLinks((prev) => prev.filter((l) =>
-            !(l.relationship_type === relationship_type &&
-              ((l.source_id === source_id && l.target_id === target_id) || (l.source_id === target_id && l.target_id === source_id)))
-          ));
-          break;
-        }
-        case 'DASHBOARD_UPDATED': {
-          setDashboardWidgets(payload);
-          break;
-        }
-        case 'VAULT_UNLOCKED': {
-          setIsVaultUnlocked(true);
-          break;
-        }
-        case 'VAULT_LOCKED': {
-          setIsVaultUnlocked(false);
-          break;
-        }
-      }
+      // Only vault lock/unlock comes via loom://event now — all item/link mutations
+      // update React state directly (no event-bus roundtrip). The automation engine
+      // uses loom://automation-changed (separate listener) to trigger a full refresh.
+      const { type } = event.payload;
+      if (type === 'VAULT_UNLOCKED') setIsVaultUnlocked(true);
+      else if (type === 'VAULT_LOCKED') setIsVaultUnlocked(false);
     }).then((u) => {
       if (!active) {
         u();
@@ -369,34 +185,31 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
     };
   }, [refresh]);
 
-  const emitLoomEvent = async (event: any) => {
-    await emit("loom://event", event);
-  };
-
-  // Each mutation = an atomic Rust IPC write + a UI event emit. The Rust write is
-  // transactional (E9 savepoint model), so there is no JS rollback to orchestrate:
-  // a failed write commits nothing. assertNotFrozen preserves the wipe-path guard.
+  // Each mutation = an atomic Rust IPC write + a direct React state update.
+  // No event-bus roundtrip: emit("loom://event") → listener → setState was a
+  // pointless async cycle for same-window mutations. State is updated inline.
+  // The loom://event listener is kept only for VAULT_UNLOCKED/LOCKED from vaultSession.
   const create = useCallback(async (type: string, title: string, meta?: any) => {
     if (!workspaceId) throw new Error("No workspace");
     assertNotFrozen(`Create ${type}`);
     const metaString = meta !== undefined ? JSON.stringify(meta) : "{}";
     const createdItem = await ipcCreate(workspaceId, title, type, metaString);
-    await emitLoomEvent({ type: 'ITEM_CREATED', payload: createdItem });
+    setItems((prev) => prev.some((x) => x.id === createdItem.id) ? prev : [createdItem, ...prev]);
     return createdItem;
   }, [workspaceId]);
 
   const updateMeta = useCallback(async (id: string, meta: any) => {
     assertNotFrozen("Update Item Metadata");
-    const payload = typeof meta === "string" ? meta : JSON.stringify(meta);
-    const updatedItem = await ipcUpdateMeta(id, payload);
-    await emitLoomEvent({ type: 'ITEM_UPDATED', payload: updatedItem });
+    const metaStr = typeof meta === "string" ? meta : JSON.stringify(meta);
+    const updatedItem = await ipcUpdateMeta(id, metaStr);
+    setItems((prev) => prev.map((x) => (x.id === id ? updatedItem : x)));
     return updatedItem;
   }, []);
 
   const updateFields = useCallback(async (id: string, title: string, type: string) => {
     assertNotFrozen("Update Item Fields");
     const updatedItem = await ipcUpdate(id, title, type);
-    await emitLoomEvent({ type: 'ITEM_UPDATED', payload: updatedItem });
+    setItems((prev) => prev.map((x) => (x.id === id ? updatedItem : x)));
     return updatedItem;
   }, []);
 
@@ -405,26 +218,41 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
     if (!itemInStore) return;
     assertNotFrozen("Delete Item");
     await ipcDelete(id);
-    await emitLoomEvent({ type: 'ITEM_DELETED', payload: { id } });
+    setItems((prev) => prev.filter((x) => x.id !== id));
+    setLinks((prev) => prev.filter((l) => l.source_id !== id && l.target_id !== id));
   }, [items]);
 
   const restore = useCallback(async (item: Item, linksToRestore: Link[]) => {
     assertNotFrozen("Restore Snapshot");
     await ipcRestoreSnapshot(item, linksToRestore);
-    await emitLoomEvent({ type: 'ITEM_RESTORED', payload: { item, links: linksToRestore } });
+    setItems((prev) => prev.some((x) => x.id === item.id) ? prev : [item, ...prev]);
+    if (linksToRestore.length > 0) {
+      setLinks((prev) => {
+        const next = [...prev];
+        for (const l of linksToRestore) {
+          if (!next.some(x => x.source_id === l.source_id && x.target_id === l.target_id && x.relationship_type === l.relationship_type)) {
+            next.push(l);
+          }
+        }
+        return next;
+      });
+    }
   }, []);
 
   const link = useCallback(async (a: string, b: string) => {
     if (a === b) return;
     assertNotFrozen("Create Link");
     const createdLinkRow = await createLink(a, b, REL);
-    await emitLoomEvent({ type: 'LINK_CREATED', payload: createdLinkRow });
+    setLinks((prev) => prev.some((l) => l.source_id === createdLinkRow.source_id && l.target_id === createdLinkRow.target_id && l.relationship_type === createdLinkRow.relationship_type) ? prev : [...prev, createdLinkRow]);
   }, []);
 
   const unlink = useCallback(async (a: string, b: string) => {
     assertNotFrozen("Delete Link");
     await deleteLink(a, b, REL);
-    await emitLoomEvent({ type: 'LINK_DELETED', payload: { source_id: a, target_id: b, relationship_type: REL } });
+    setLinks((prev) => prev.filter((l) =>
+      !(l.relationship_type === REL &&
+        ((l.source_id === a && l.target_id === b) || (l.source_id === b && l.target_id === a)))
+    ));
   }, []);
 
   const map = useMemo(() => {
@@ -446,7 +274,7 @@ export function ItemStoreProvider({ children }: { children: React.ReactNode }) {
     if (!workspaceId) return;
     assertNotFrozen("Save Dashboard Layout");
     await saveDashboardLayout(workspaceId, widgets);
-    await emitLoomEvent({ type: 'DASHBOARD_UPDATED', payload: widgets });
+    setDashboardWidgets(widgets);
   }, [workspaceId]);
 
   const value: ItemStoreType = { workspaceId, ready, items, links, isVaultUnlocked, resolve, create, updateMeta, updateFields, remove, restore, link, unlink, refresh, error, dashboardWidgets, saveDashboard };
@@ -526,6 +354,7 @@ export function useFiles() {
           item_type: f.item_type,
           title: f.title,
           created_at: String(f.modified_at),
+          updated_at: String(f.modified_at),
           user_pinned: false,
           user_size_preference: null,
           metadata: JSON.stringify(meta)
@@ -538,26 +367,6 @@ export function useFiles() {
     const ext = meta?.ext || null;
     const folder = meta?.folder || "Unfiled";
     const createdFile = await fsCreateFile(store.workspaceId!, title, ext, folder);
-    const itemPayload = {
-      id: createdFile.id,
-      workspace_id: createdFile.workspace_id,
-      item_type: createdFile.item_type,
-      title: createdFile.title,
-      created_at: String(createdFile.modified_at),
-      user_pinned: false,
-      user_size_preference: null,
-      metadata: JSON.stringify({
-        folder,
-        ext: (createdFile.extension || "").toUpperCase(),
-        size: createdFile.size_bytes ? (createdFile.size_bytes / 1024).toFixed(1) + " KB" : "—",
-        updated: "Just now",
-        color: "var(--h-files)",
-        icon: "ph-file",
-        path: createdFile.path,
-        filename: createdFile.filename
-      })
-    };
-    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
     return items.find(i => i.id === createdFile?.id) || items[0];
   }, [store, items]);
@@ -565,16 +374,12 @@ export function useFiles() {
   const remove = useCallback(async (id: string) => {
     assertNotFrozen("Delete File");
     await fsDeleteFile(id);
-    await emit("loom://event", { type: 'ITEM_DELETED', payload: { id } });
     await store.refresh();
   }, [store]);
 
   const updateFields = useCallback(async (id: string, title: string) => {
     assertNotFrozen("Rename File");
     await fsRenameFile(id, title);
-    const wsItems = await getItems(store.workspaceId!);
-    const renamedFile = wsItems.find(x => x.id === id);
-    if (renamedFile) await emit("loom://event", { type: 'ITEM_UPDATED', payload: renamedFile });
     await store.refresh();
     return items.find(i => i.id === id) || items[0];
   }, [store, items]);
@@ -582,28 +387,6 @@ export function useFiles() {
   const importFile = useCallback(async (sourcePath: string, strategy: "copy" | "reference") => {
     assertNotFrozen("Import File");
     const importedFile = await fsImportFile(store.workspaceId!, sourcePath, strategy);
-    const filename = sourcePath.split(/[\/\\]/).pop() || "file";
-    const ext = filename.split(".").pop()?.toUpperCase() || "—";
-    const itemPayload = {
-      id: importedFile.id,
-      workspace_id: importedFile.workspace_id,
-      item_type: "file",
-      title: filename.replace(/\.[^/.]+$/, ""),
-      created_at: String(Date.now()),
-      user_pinned: false,
-      user_size_preference: null,
-      metadata: JSON.stringify({
-        folder: "Unfiled",
-        ext,
-        size: "—",
-        updated: "Just now",
-        color: "var(--h-files)",
-        icon: "ph-file",
-        path: importedFile.path,
-        filename
-      })
-    };
-    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
     return importedFile;
   }, [store]);
@@ -664,6 +447,7 @@ export function useNotes() {
           item_type: "note",
           title: f.title,
           created_at: String(f.modified_at),
+          updated_at: String(f.modified_at),
           user_pinned: false,
           user_size_preference: null,
           metadata: JSON.stringify(cachedMeta)
@@ -674,25 +458,6 @@ export function useNotes() {
   const create = useCallback(async (title: string, _meta?: any) => {
     assertNotFrozen("Create Note");
     const createdNote = await fsCreateNote(store.workspaceId!, title);
-    const itemPayload = {
-      id: createdNote.id,
-      workspace_id: createdNote.workspace_id,
-      item_type: "note",
-      title: createdNote.title,
-      created_at: String(createdNote.modified_at),
-      user_pinned: false,
-      user_size_preference: null,
-      metadata: JSON.stringify({
-        folder: "Notes",
-        preview: "Empty note.",
-        words: 0,
-        tag: "",
-        body: [],
-        path: createdNote.path,
-        filename: createdNote.filename
-      })
-    };
-    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
     return items.find(i => i.id === createdNote?.id) || items[0];
   }, [store, items]);
@@ -700,16 +465,12 @@ export function useNotes() {
   const remove = useCallback(async (id: string) => {
     assertNotFrozen("Delete Note");
     await fsDeleteFile(id);
-    await emit("loom://event", { type: 'ITEM_DELETED', payload: { id } });
     await store.refresh();
   }, [store]);
 
   const updateFields = useCallback(async (id: string, title: string) => {
     assertNotFrozen("Rename Note");
     await fsRenameFile(id, title);
-    const wsItems = await getItems(store.workspaceId!);
-    const renamedNote = wsItems.find(x => x.id === id);
-    if (renamedNote) await emit("loom://event", { type: 'ITEM_UPDATED', payload: renamedNote });
     await store.refresh();
     return items.find(i => i.id === id) || items[0];
   }, [store, items]);
@@ -717,26 +478,6 @@ export function useNotes() {
   const importNote = useCallback(async (sourcePath: string) => {
     assertNotFrozen("Import Note");
     const importedNote = await fsImportNoteFile(store.workspaceId!, sourcePath);
-    const filename = sourcePath.split(/[\/\\]/).pop() || "note";
-    const itemPayload = {
-      id: importedNote.id,
-      workspace_id: importedNote.workspace_id,
-      item_type: "note",
-      title: filename.replace(/\.[^/.]+$/, ""),
-      created_at: String(Date.now()),
-      user_pinned: false,
-      user_size_preference: null,
-      metadata: JSON.stringify({
-        folder: "Notes",
-        preview: "Imported note.",
-        words: 0,
-        tag: "",
-        body: [],
-        path: importedNote.path,
-        filename
-      })
-    };
-    await emit("loom://event", { type: 'ITEM_CREATED', payload: itemPayload });
     await store.refresh();
     return importedNote;
   }, [store]);

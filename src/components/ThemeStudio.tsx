@@ -167,7 +167,7 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
       const url = convertFileSrc(sel);
       try {
         const profile = await processBackground(url);
-        const newBg = { ...bg!, bgImage: url, profile };
+        const newBg = { ...bg!, bgImage: sel, profile };
         setBg(newBg);
         await setBackgroundConfig(newBg);
         applyBackgroundConfig(newBg);

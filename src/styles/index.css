@@ -352,6 +352,7 @@ input, textarea { font-family: inherit; color: inherit; }
     radial-gradient(900px 700px at 0% 110%, var(--bg-grad-b), transparent 55%),
     var(--bg);
   overflow: hidden;
+  transition: background 0.8s ease;
 }
 
 /* ---------- Titlebar ---------- */
@@ -1612,6 +1613,7 @@ textarea:focus-visible,
     radial-gradient(70vw 55vh at 78% -8%, color-mix(in oklch, var(--accent) 9%, transparent), transparent 60%),
     radial-gradient(60vw 50vh at 6% 108%, var(--bg-grad-a), transparent 65%),
     linear-gradient(180deg, var(--bg-void), var(--bg));
+  transition: opacity 0.8s ease;
 }
 
 html { scroll-behavior: smooth; }
@@ -1969,6 +1971,12 @@ html { scroll-behavior: smooth; }
 [data-bg="on"] #loom-bg-engine {
   opacity: 1;
   background-image: var(--bg-img);
+}
+[data-bg="on"] .app {
+  background: transparent !important;
+}
+[data-bg="on"] #root::after {
+  opacity: 0 !important;
 }
 /* Smart region handling based on user interactions/layout (Readability Engine) */
 #loom-bg-engine::after {

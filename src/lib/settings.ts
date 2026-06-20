@@ -5,6 +5,7 @@
 // read SQLite directly and never persist here.
 
 import { getSetting, setSetting } from "../ipc/items";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 export const THEME_KEY = "loom.theme";       // a theme id or "system"
 export const ACCENT_KEY = "loom.accent";     // an accent id
@@ -242,7 +243,10 @@ export function applyCombinedThemeAndBackground() {
     
     // Convert local file path to asset protocol if it's an absolute path
     const imgUrl = currentBgConfig.bgImage;
-    root.setProperty("--bg-img", `url("${imgUrl.replace(/\\/g, "/")}")`);
+    const convertedUrl = (imgUrl.startsWith("http://") || imgUrl.startsWith("https://") || imgUrl.startsWith("asset:") || imgUrl.startsWith("data:"))
+      ? imgUrl
+      : convertFileSrc(imgUrl);
+    root.setProperty("--bg-img", `url("${convertedUrl.replace(/\\/g, "/")}")`);
     
     // Apply readability cssVars if bgDynamic is true and profile exists
     if (currentBgConfig.profile) {

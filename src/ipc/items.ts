@@ -6,6 +6,7 @@ export interface Item {
   item_type: string;
   title: string;
   created_at: string;
+  updated_at: string;
   user_pinned: boolean;
   user_size_preference: string | null;
   metadata: string; // JSON string

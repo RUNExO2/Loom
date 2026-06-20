@@ -16,6 +16,7 @@ function makeItem(id: string): Item {
     item_type: "task",
     title: "Original task",
     created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
     user_pinned: false,
     user_size_preference: null,
     metadata: JSON.stringify({ done: false, priority: "med" }),
