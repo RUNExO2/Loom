@@ -1866,6 +1866,16 @@ html { scroll-behavior: smooth; }
   50% { box-shadow: 0 0 0 2px var(--accent), 0 0 0 8px color-mix(in oklch, var(--accent) 10%, transparent); }
 }
 
+/* clickable specimen regions — reverse targeting (click → jump to control) */
+.ts-target { cursor: pointer; }
+
+/* palette history — a row of recently-replaced palette swatches */
+.ts-history { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0; }
+.ts-hist { padding: 0; border: 1px solid var(--border); border-radius: var(--r-sm); background: none; cursor: pointer; overflow: hidden; transition: border-color var(--dur-fast), transform var(--dur-fast); }
+.ts-hist:hover { border-color: var(--accent); transform: translateY(-1px); }
+.ts-hist-pal { display: grid; grid-template-columns: repeat(4, 1fr); width: 56px; height: 24px; }
+.ts-hist-pal > div { width: 100%; height: 100%; }
+
 /* Titlebar Pill Navigation */
 .tb-top-nav {
   flex: 1;

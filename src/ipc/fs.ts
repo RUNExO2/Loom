@@ -56,3 +56,19 @@ export const fsCopyFile = (src: string, dest: string) =>
 
 export const fsWriteAnyFile = (path: string, content: string) =>
   apiInvoke<void>("fs_write_any_file", { path, content });
+
+// ── Managed background image storage ──────────────────────────────────────────
+// These three commands implement the copy-into-managed-storage pattern that makes
+// backgrounds portable across devices, backups, and workspace exports/imports.
+
+/** Copy an image file into app_data/backgrounds/ and return a portable relative path. */
+export const bgImportImage = (src: string) =>
+  apiInvoke<string>("bg_import_image", { src });
+
+/** Resolve a relative managed path ("backgrounds/foo.jpg") to an absolute path for convertFileSrc. */
+export const bgResolvePath = (rel: string) =>
+  apiInvoke<string>("bg_resolve_path", { rel });
+
+/** Delete a managed background file. No-ops on non-managed (non-"backgrounds/") paths. */
+export const bgDeleteManaged = (rel: string) =>
+  apiInvoke<void>("bg_delete_managed", { rel });

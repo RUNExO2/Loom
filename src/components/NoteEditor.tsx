@@ -10,7 +10,7 @@ import { MediaEmbed } from "./MediaEmbed";
 import { useModal } from "./Modal";
 import { I } from "../lib/context";
 
-// Imperative handle so the parent's existing actions (attach file, AI summarize,
+// Imperative handle so the parent's existing actions (attach file,
 // auto-tag) can read/insert content without owning the editor instance.
 export interface NoteEditorApi {
   getHTML: () => string;
@@ -77,14 +77,12 @@ export interface NoteEditorProps {
   onSave: (html: string) => void;
   onDiscard: () => void;
   onAttach: () => void;
-  onSummarize: () => void;
   onAutoTag: () => void;
-  summarizing: boolean;
   /** Optional extra toolbar buttons (rich-media menu) rendered after the app actions. */
   extraTools?: (editor: Editor) => React.ReactNode;
 }
 
-export function NoteEditor({ apiRef, initialHtml, onChange, onSave, onDiscard, onAttach, onSummarize, onAutoTag, summarizing, extraTools }: NoteEditorProps) {
+export function NoteEditor({ apiRef, initialHtml, onChange, onSave, onDiscard, onAttach, onAutoTag, extraTools }: NoteEditorProps) {
   const modal = useModal();
   const [, force] = useState(0); // re-render toolbar active states on selection change
   const [slash, setSlash] = useState<{ open: boolean; query: string; from: number; top: number; left: number; index: number }>(
@@ -235,9 +233,6 @@ export function NoteEditor({ apiRef, initialHtml, onChange, onSave, onDiscard, o
         <button onMouseDown={(e) => { e.preventDefault(); onAttach(); }} title="Attach File"><I n="ph-paperclip" w="bold" /> Attach</button>
         {extraTools?.(editor)}
         <div className="tb-sep" />
-        <button onMouseDown={(e) => { e.preventDefault(); onSummarize(); }} title="AI Summarize" disabled={summarizing}>
-          <I n={summarizing ? "ph-spinner" : "ph-magic-wand"} w="bold" /> {summarizing ? "Thinking..." : "Summarize"}
-        </button>
         <button onMouseDown={(e) => { e.preventDefault(); onAutoTag(); }} title="Auto-Tag from content"><I n="ph-tag" w="bold" /> Auto-Tag</button>
         <div className="tb-sep" />
         {fmtBtn(() => editor.chain().focus().undo().run(), "Undo", "ph-arrow-counter-clockwise")}

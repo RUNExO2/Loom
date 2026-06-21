@@ -1781,6 +1781,92 @@ pub async fn run_integrity_sweep(state: State<'_, AppState>, app_handle: tauri::
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
+// ── Managed background image storage ────────────────────────────────────────
+// Backgrounds are copied into app_data/backgrounds/ so they are device-portable
+// (the archive export already walks all of app_data), survive backup/restore, and
+// load reliably regardless of the user's original file location.
+
+fn get_backgrounds_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dir = app_data_dir.join("backgrounds");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(dir)
+}
+
+/// Copy an image into managed storage and return a portable relative path
+/// ("backgrounds/<safe_name>_<timestamp>.<ext>").  The relative path is what
+/// gets stored in the settings DB — it can be resolved on any device after a
+/// backup/restore because the archive always includes the backgrounds/ folder.
+#[tauri::command]
+pub async fn bg_import_image(app_handle: tauri::AppHandle, src: String) -> Result<String, String> {
+    let src_path = Path::new(&src);
+    if !src_path.exists() || !src_path.is_file() {
+        return Err("Source image does not exist".into());
+    }
+    let ext = src_path.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !["jpg", "jpeg", "png", "webp", "avif"].contains(&ext.as_str()) {
+        return Err("Only jpg, jpeg, png, webp images are supported".into());
+    }
+    let backgrounds_dir = get_backgrounds_dir(&app_handle)?;
+    // Sanitize to alphanumeric/dash/underscore so the filename is safe in CSS url().
+    let stem = src_path.file_stem().unwrap_or_default().to_string_lossy();
+    let safe_stem: String = stem.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(60)
+        .collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let filename = format!("{}_{}.{}", safe_stem, ts, ext);
+    let dest = backgrounds_dir.join(&filename);
+    fs::copy(src_path, &dest)
+        .map_err(|e| format!("Failed to copy background image: {}", e))?;
+    Ok(format!("backgrounds/{}", filename))
+}
+
+/// Resolve a relative managed path ("backgrounds/foo.jpg") to an absolute path.
+/// Also accepts legacy absolute paths so old configs work until they are migrated.
+#[tauri::command]
+pub async fn bg_resolve_path(app_handle: tauri::AppHandle, rel: String) -> Result<String, String> {
+    let p = Path::new(&rel);
+    if p.is_absolute() {
+        // Legacy path: return as-is if it still exists.
+        if p.exists() { return Ok(rel); }
+        return Err(format!("Background image no longer exists: {}", rel));
+    }
+    let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let abs = app_data_dir.join(&rel);
+    if !abs.exists() {
+        return Err(format!("Managed background not found: {}", rel));
+    }
+    Ok(abs.to_string_lossy().into_owned())
+}
+
+/// Delete a managed background image.  Only operates on paths inside the
+/// backgrounds/ folder so it cannot be weaponised to delete arbitrary files.
+#[tauri::command]
+pub async fn bg_delete_managed(app_handle: tauri::AppHandle, rel: String) -> Result<(), String> {
+    if !rel.starts_with("backgrounds/") && !rel.starts_with("backgrounds\\") {
+        return Ok(()); // not a managed path, ignore silently
+    }
+    let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let abs = app_data_dir.join(&rel);
+    // Confirm the resolved path sits inside backgrounds/ to block any path traversal.
+    let bg_dir = app_data_dir.join("backgrounds");
+    if !abs.starts_with(&bg_dir) {
+        return Err("Path traversal detected".into());
+    }
+    if abs.exists() {
+        fs::remove_file(&abs).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

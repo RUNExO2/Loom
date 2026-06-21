@@ -10,6 +10,7 @@ export interface LoomContextType {
   openPalette: () => void;
   editDash: () => void;
   showShortcuts: () => void;
+  openThemeStudio: () => void;
   toggleTheme: () => void;
   themePref: ThemePref;
   setTheme: (p: ThemePref) => void;

@@ -31,6 +31,7 @@ export interface ActionDeps {
   editDash: () => void;
   showShortcuts: () => void;
   toggleTheme: () => void;
+  openThemeStudio?: () => void;
   setNavStyle?: (style: "sidebar" | "top-pill") => void;
   setDensity?: (mode: import("./settings").DensityMode) => void;
 }
@@ -123,6 +124,11 @@ export function buildActions(d: ActionDeps): Action[] {
       id: "cmd-shortcuts", title: "Keyboard Shortcuts", icon: "ph-keyboard", color: "var(--text-faint)",
       section: "General", keywords: "shortcuts keys help bindings",
       run: () => d.showShortcuts(),
+    },
+    {
+      id: "cmd-theme-studio", title: "Open Theme Studio", icon: "ph-paint-brush-broad", color: "var(--accent)",
+      section: "General", keywords: "theme studio customize colors tokens palette font background",
+      run: () => d.openThemeStudio?.(),
     },
     // --- WORKSPACE PRESETS ---
     {

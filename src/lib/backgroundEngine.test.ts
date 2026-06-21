@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { processBackground } from "./backgroundEngine";
-import { applyBackgroundConfig } from "./settings";
-import { applyCustomTheme } from "./theme";
+import { themeStore } from "./themeStore";
+
+// Stub Tauri's asset URL converter so the combined render runs in jsdom.
+vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (p: string) => `asset://localhost/${p}` }));
 
 describe("Background Engine Core", () => {
   it("extracts colors and variance correctly using processBackground", async () => {
@@ -103,9 +105,18 @@ describe("Background Engine Core", () => {
     const result = await processBackground("data:image/png;base64,dummy");
 
     expect(result.luminance).toBeGreaterThan(0.9);
-    // For avgLuminance > 0.6, overlayOpacity should be 0.85
-    // --region-overlay-card should use Math.round(0.85 * 100) = 85%
+    // For avgLuminance > 0.6, overlayOpacity = 0.85
+    expect(result.cssVars["--bg-overlay"]).toBe("0.850");
+    // baseBlur 12 + 8 (bright) = 20
+    expect(result.cssVars["--bg-blur"]).toBe("20px");
+    // region vars still carry 85%
     expect(result.cssVars["--region-overlay-card"]).toContain("85%");
+    // dead vars must not be present
+    expect(result.cssVars["--bg-luminance"]).toBeUndefined();
+    expect(result.cssVars["--bg-variance"]).toBeUndefined();
+    expect(result.cssVars["--bg-tint"]).toBeUndefined();
+    expect(result.cssVars["--region-blur-content"]).toBeUndefined();
+    expect(result.cssVars["--region-overlay-content"]).toBeUndefined();
 
     global.Image = originalImage;
     document.createElement = originalCreateElement;
@@ -120,7 +131,7 @@ describe("Background Engine Core", () => {
     expect(document.documentElement.style.getPropertyValue("--accent")).toBe("#ff0000");
 
     // 1. Call with bgUseColors: false
-    applyBackgroundConfig({
+    themeStore.setBackground({
       bgImage: "test.jpg",
       bgDynamic: true,
       bgUseColors: false,
@@ -140,7 +151,7 @@ describe("Background Engine Core", () => {
     document.documentElement.style.setProperty("--accent", "#ff0000");
 
     // 2. Call with bgImage: null
-    applyBackgroundConfig({
+    themeStore.setBackground({
       bgImage: null,
       bgDynamic: true,
       bgUseColors: true,
@@ -153,8 +164,8 @@ describe("Background Engine Core", () => {
 
   it("coerces background config and custom theme correctly", () => {
     // 1. Clear any state first
-    applyCustomTheme(null, false);
-    applyBackgroundConfig({
+    themeStore.setCustomTheme(null, false);
+    themeStore.setBackground({
       bgImage: null,
       bgDynamic: true,
       bgUseColors: false,
@@ -165,13 +176,13 @@ describe("Background Engine Core", () => {
     expect(document.documentElement.style.getPropertyValue("--accent")).toBe("");
 
     // 2. Custom theme is enabled, background extraction is enabled
-    applyCustomTheme({
+    themeStore.setCustomTheme({
       id: "ct_test",
       name: "Test theme",
       tokens: { "--accent": "#999999" }
     }, true);
 
-    applyBackgroundConfig({
+    themeStore.setBackground({
       bgImage: "test.jpg",
       bgDynamic: true,
       bgUseColors: true,
@@ -190,7 +201,7 @@ describe("Background Engine Core", () => {
     expect(document.documentElement.style.getPropertyValue("--surface-1")).toBe("#232323");
 
     // 3. Toggle background extraction to false
-    applyBackgroundConfig({
+    themeStore.setBackground({
       bgImage: "test.jpg",
       bgDynamic: true,
       bgUseColors: false,
@@ -209,7 +220,7 @@ describe("Background Engine Core", () => {
     expect(document.documentElement.style.getPropertyValue("--surface-1")).toBe("");
 
     // 4. Disable custom theme
-    applyCustomTheme(null, false);
+    themeStore.setCustomTheme(null, false);
 
     // Everything is cleared
     expect(document.documentElement.style.getPropertyValue("--accent")).toBe("");

@@ -379,8 +379,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
   const [contentHtml, setContentHtml] = useState<string>("");
   const [isEditing, setIsEditing] = useState<boolean>(false);
 
-  const [isSummarizing, setIsSummarizing] = useState(false);
-  const [aiSummary, setAiSummary] = useState<string | null>(null);
+
   const [showHistory, setShowHistory] = useState(false);
   const [find, setFind] = useState<{ open: boolean; q: string }>({ open: false, q: "" });
   const findInputRef = useRef<HTMLInputElement>(null);
@@ -467,7 +466,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
         .then((html) => {
           setContentHtml(html);
           lastSavedHtml.current = html;
-          setAiSummary(null);
           setIsEditing(false);
           setTimeout(() => {
             if ((window as any).mermaid) {
@@ -496,7 +494,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
         });
     } else {
       setContentHtml("");
-      setAiSummary(null);
       setIsEditing(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -559,33 +556,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
     }
   };
 
-  const handleAISummarize = async () => {
-    if (!activeNote) return;
-    setIsSummarizing(true);
-    try {
-      const tempDiv = document.createElement("div");
-      tempDiv.innerHTML = editorApiRef.current?.getHTML() || contentHtml;
-      const plainText = (tempDiv.innerText || "").trim();
-      if (!plainText) { setAiSummary("Nothing to summarize yet."); return; }
-
-      const res = await fetch("http://localhost:11434/api/generate", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "llama3", prompt: "Summarize this note briefly:\n\n" + plainText, stream: false })
-      }).catch(() => null);
-
-      if (res && res.ok) {
-        const data = await res.json();
-        setAiSummary(data.response);
-      } else {
-        setAiSummary("No local AI model detected. Install and run Ollama (a local 'llama3' model) at localhost:11434 to generate summaries. Nothing was fabricated.");
-      }
-    } catch (e) {
-      console.error(e);
-      setAiSummary("Error contacting the local AI model.");
-    } finally {
-      setIsSummarizing(false);
-    }
-  };
 
   const handleNewNote = async () => {
     const r = await modal.form({ panel: true,
@@ -970,16 +940,6 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
 
                 {isEditing ? (
               <>
-                {aiSummary && (
-                  <div style={{ padding: "12px 16px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", display: "flex", gap: 12, marginTop: 14 }}>
-                    <I n="ph-magic-wand" style={{ color: "var(--accent)", fontSize: 20, marginTop: 2 }} />
-                    <div style={{ flex: 1, fontSize: "var(--fs-sm)", lineHeight: 1.5 }}>
-                      <b style={{ color: "var(--text)" }}>AI Summary</b>
-                      <div className="muted">{aiSummary}</div>
-                    </div>
-                    <button className="btn icon sm" onClick={() => setAiSummary(null)}><I n="ph-x" /></button>
-                  </div>
-                )}
                 <NoteEditor
                   key={activeNote.id}
                   apiRef={editorApiRef}
@@ -988,9 +948,7 @@ export function NotesModule({ focusId }: { focusId?: string | null }) {
                   onSave={handleEditorSave}
                   onDiscard={handleEditorDiscard}
                   onAttach={handleAttachFile}
-                  onSummarize={handleAISummarize}
                   onAutoTag={handleAutoTag}
-                  summarizing={isSummarizing}
                   extraTools={(editor) => (
                     <MediaTools
                       editor={editor}

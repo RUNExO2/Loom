@@ -5,7 +5,7 @@
 // read SQLite directly and never persist here.
 
 import { getSetting, setSetting } from "../ipc/items";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { bgImportImage, bgResolvePath } from "../ipc/fs";
 
 export const THEME_KEY = "loom.theme";       // a theme id or "system"
 export const ACCENT_KEY = "loom.accent";     // an accent id
@@ -101,12 +101,16 @@ export type NavStyle = "sidebar" | "top-pill";
 import { BackgroundProfile } from "./backgroundEngine";
 
 export interface BackgroundConfig {
-  bgImage: string | null;
+  bgImage: string | null;          // stored: relative "backgrounds/…" or null
   bgDynamic: boolean;
   bgUseColors: boolean;
   bgParallax: boolean;
   profile: BackgroundProfile | null;
+  _resolvedPath?: string | null;   // runtime-only: absolute path for convertFileSrc, never persisted
 }
+
+/** True for old-format absolute paths (Windows drive letter or Unix root). */
+const isAbsolutePath = (p: string) => /^[a-zA-Z]:/.test(p) || p.startsWith('/') || p.startsWith('\\');
 
 export const FONTS = [
   { id: "inter", label: "Inter (Default)" },
@@ -183,111 +187,49 @@ export async function getBackgroundConfig(): Promise<BackgroundConfig> {
   const v = await getSetting(BG_CONFIG_KEY);
   const def: BackgroundConfig = { bgImage: null, bgDynamic: true, bgUseColors: true, bgParallax: true, profile: null };
   if (!v) return def;
-  try {
-    const p = JSON.parse(v);
-    return { ...def, ...p };
-  } catch { return def; }
-}
-export async function setBackgroundConfig(c: BackgroundConfig) {
-  await setSetting(BG_CONFIG_KEY, JSON.stringify(c));
-}
-let currentBgConfig: BackgroundConfig = { bgImage: null, bgDynamic: true, bgUseColors: true, bgParallax: true, profile: null };
-let currentCustomTheme: any = null;
-let currentCustomThemeEnabled = false;
+  let config: BackgroundConfig;
+  try { config = { ...def, ...(JSON.parse(v) as Partial<BackgroundConfig>) }; }
+  catch { return def; }
 
-export function setBackgroundConfigCache(c: BackgroundConfig) {
-  currentBgConfig = c;
-}
-
-export function setCustomThemeCache(theme: any, enabled: boolean) {
-  currentCustomTheme = theme;
-  currentCustomThemeEnabled = enabled;
-}
-
-export function applyCombinedThemeAndBackground() {
-  if (typeof document === "undefined") return;
-  const root = document.documentElement.style;
-  
-  // 1. Clear readability/blur/overlay variables
-  const clearVars = [
-    "--bg-luminance", "--bg-variance", "--bg-tint", "--bg-img",
-    "--region-blur-nav", "--region-blur-card", "--region-blur-content", "--region-blur-modal",
-    "--region-overlay-nav", "--region-overlay-card", "--region-overlay-content", "--region-overlay-modal"
-  ];
-  clearVars.forEach(k => root.removeProperty(k));
-  
-  // 2. Clear all custom theme variable keys
-  const themeKeys = [
-    "--font-ui", "--ui-scale", "--ui-weight",
-    "--radius-scale", "--shadow-2",
-    "--bg", "--accent", "--surface-1", "--surface-2", "--glass", "--border",
-    "--text", "--text-dim", "--surface-hover", "--selection-bg",
-    "--graph-edge", "--graph-label", "--reader-bg", "--reader-text"
-  ];
-  themeKeys.forEach(k => root.removeProperty(k));
-  
-  // 3. Apply background parallax & dataset.bg
-  if (!currentBgConfig.bgImage) {
-    delete document.documentElement.dataset.bg;
-    delete document.documentElement.dataset.parallax;
-  } else {
-    document.documentElement.dataset.bg = "on";
-    // Honor prefers-reduced-motion: never drive the JS mousemove parallax for users
-    // who asked for reduced motion (the onMove listener no-ops when this flag is unset).
-    const reducedMotion = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (currentBgConfig.bgParallax && !reducedMotion) {
-      document.documentElement.dataset.parallax = "on";
-    } else {
-      delete document.documentElement.dataset.parallax;
+  if (config.bgImage) {
+    // Migration: old configs stored absolute paths — copy into managed storage now.
+    if (isAbsolutePath(config.bgImage)) {
+      try {
+        const rel = await bgImportImage(config.bgImage);
+        config.bgImage = rel;
+        await setSetting(BG_CONFIG_KEY, JSON.stringify(sanitizeBgConfig(config)));
+      } catch {
+        // Original file gone or unsupported; clear gracefully.
+        config.bgImage = null;
+        await setSetting(BG_CONFIG_KEY, JSON.stringify(sanitizeBgConfig(config)));
+      }
     }
-    
-    // Convert local file path to asset protocol if it's an absolute path
-    const imgUrl = currentBgConfig.bgImage;
-    const convertedUrl = (imgUrl.startsWith("http://") || imgUrl.startsWith("https://") || imgUrl.startsWith("asset:") || imgUrl.startsWith("data:"))
-      ? imgUrl
-      : convertFileSrc(imgUrl);
-    root.setProperty("--bg-img", `url("${convertedUrl.replace(/\\/g, "/")}")`);
-    
-    // Apply readability cssVars if bgDynamic is true and profile exists
-    if (currentBgConfig.profile) {
-      if (currentBgConfig.bgDynamic) {
-        for (const [k, v] of Object.entries(currentBgConfig.profile.cssVars)) {
-          root.setProperty(k, v);
-        }
+    // Resolve relative path to absolute for synchronous CSS application.
+    if (config.bgImage) {
+      try {
+        config._resolvedPath = await bgResolvePath(config.bgImage);
+      } catch {
+        // File missing from managed storage (deleted externally); clear.
+        config.bgImage = null;
+        config._resolvedPath = null;
+        await setSetting(BG_CONFIG_KEY, JSON.stringify(sanitizeBgConfig(config)));
       }
     }
   }
-
-  // 4. Apply Custom Theme if enabled
-  const themeTokens = (currentCustomThemeEnabled && currentCustomTheme) ? (currentCustomTheme.tokens || {}) : {};
-  for (const k of themeKeys) {
-    const v = themeTokens[k];
-    if (v != null && v !== "") {
-      root.setProperty(k, v);
-    }
-  }
-
-  // 5. Apply Background Colors if enabled and not overridden by custom theme
-  if (currentBgConfig.bgImage && currentBgConfig.profile && currentBgConfig.bgUseColors) {
-    const primary = currentBgConfig.profile.colors.primary;
-    const surfaceTint = currentBgConfig.profile.colors.surfaceTint;
-
-    if (themeTokens["--accent"] == null || themeTokens["--accent"] === "") {
-      root.setProperty("--accent", primary);
-    }
-    if (themeTokens["--selection-bg"] == null || themeTokens["--selection-bg"] === "") {
-      root.setProperty("--selection-bg", primary);
-    }
-    if (themeTokens["--surface-1"] == null || themeTokens["--surface-1"] === "") {
-      root.setProperty("--surface-1", surfaceTint);
-    }
-  }
+  return config;
 }
 
-export function applyBackgroundConfig(c: BackgroundConfig) {
-  setBackgroundConfigCache(c);
-  applyCombinedThemeAndBackground();
+/** Strip runtime-only fields before persisting. */
+function sanitizeBgConfig(c: BackgroundConfig): Omit<BackgroundConfig, '_resolvedPath'> {
+  const { _resolvedPath: _, ...rest } = c;
+  return rest;
 }
+
+export async function setBackgroundConfig(c: BackgroundConfig) {
+  await setSetting(BG_CONFIG_KEY, JSON.stringify(sanitizeBgConfig(c)));
+}
+// NOTE: the merged background + custom-theme CSS apply, and the state it reads, now
+// live in themeStore.ts. This module is purely persistence + pure DOM helpers.
 
 // ── Startup view ──
 export interface StartupOption { id: string; label: string; icon: string; }

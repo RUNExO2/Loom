@@ -10,7 +10,6 @@
 
 import { getSetting, setSetting } from "../ipc/items";
 import { getCustomCss } from "../ipc/content";
-import { setCustomThemeCache, applyCombinedThemeAndBackground } from "./settings";
 
 // Live CSS reload: (re)inject the concatenated user CSS from the Custom CSS folder into a
 // single managed <style> tag. Called at launch and whenever the window regains focus, so
@@ -145,14 +144,11 @@ function fxTarget(): HTMLElement | null {
   return (document.getElementById("root") as HTMLElement) || document.documentElement;
 }
 
-// Write (or clear) the active theme's overrides. Tokens go on <html> so overlays inherit
-// the palette too; the effects `filter` rides on #root. Always clears first so a removed
-// token reverts to the base theme immediately.
-export function applyCustomTheme(theme: CustomTheme | null, enabled: boolean) {
+// Write (or clear) the active theme's effects `filter` on #root. Pure DOM helper — the
+// token overrides on <html> and the bg/custom merge are handled by themeStore, which
+// calls this. Always clears first so a removed effect reverts immediately.
+export function applyThemeFilter(theme: CustomTheme | null, enabled: boolean) {
   if (typeof document === "undefined") return;
-
-  setCustomThemeCache(theme, enabled);
-  applyCombinedThemeAndBackground();
 
   const s = document.documentElement.style;
   const fx = fxTarget();
@@ -160,8 +156,7 @@ export function applyCustomTheme(theme: CustomTheme | null, enabled: boolean) {
   if (fx) fx.style.removeProperty("filter");
   if (!enabled || !theme) return;
 
-  const t = theme.tokens || {};
-  const filter = composeFilter(t);
+  const filter = composeFilter(theme.tokens || {});
   if (filter && fx) fx.style.setProperty("filter", filter);
 }
 
@@ -185,17 +180,27 @@ export function serializeTheme(t: CustomTheme): string {
   return JSON.stringify({ loomTheme: 1, name: t.name, tokens: t.tokens }, null, 2);
 }
 export function parseTheme(json: string): CustomTheme {
-  const o = JSON.parse(json);
-  if (!o || typeof o !== "object" || typeof o.tokens !== "object" || o.tokens === null) {
-    throw new Error("Not a valid LOOM theme file.");
-  }
-  // Keep only known token keys to avoid injecting arbitrary properties.
+  let raw: unknown;
+  try { raw = JSON.parse(json); } catch { throw new Error("Not a valid LOOM theme file (invalid JSON)."); }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Not a valid LOOM theme file.");
+  const o = raw as Record<string, unknown>;
+  if (o.loomTheme !== 1) throw new Error("Not a valid LOOM theme file (missing version marker).");
+  if (typeof o.tokens !== "object" || o.tokens === null || Array.isArray(o.tokens))
+    throw new Error("Not a valid LOOM theme file (missing tokens).");
+  // Keep only known token keys; sanitize values to prevent CSS injection via themeToCss.
   const allowed = new Set([...MANAGED_VAR_KEYS, ...FX_KEYS]);
   const tokens: Record<string, string> = {};
-  for (const [k, v] of Object.entries(o.tokens)) {
-    if (allowed.has(k) && typeof v === "string") tokens[k] = v;
+  for (const [k, v] of Object.entries(o.tokens as Record<string, unknown>)) {
+    if (allowed.has(k) && typeof v === "string") {
+      // ponytail: strip chars that escape CSS variable context in generated :root{} blocks
+      const clean = v.replace(/[{};]/g, "").slice(0, 500).trim();
+      if (clean) tokens[k] = clean;
+    }
   }
-  return { id: newThemeId(), name: typeof o.name === "string" ? o.name : "Imported theme", tokens };
+  const name = typeof o.name === "string"
+    ? o.name.replace(/[<>"]/g, "").slice(0, 100).trim() || "Imported theme"
+    : "Imported theme";
+  return { id: newThemeId(), name, tokens };
 }
 
 // ── Color math - contrast guard for the Studio ──────────────────────────────────

@@ -9,15 +9,13 @@ import { useCommands } from "./lib/commands";
 import { makeActionsApi, ActionsCtx } from "./lib/actions";
 import { buildNav } from "./lib/stats";
 import {
-  getThemePref, setThemePref as persistThemePref, resolveTheme, applyResolvedTheme, themeFamily,
-  getAccentPref, setAccentPref as persistAccentPref, applyAccent,
-  getStartupView, SHORTCUTS, ThemePref, Resolved,
+  themeFamily, getStartupView, SHORTCUTS, ThemePref,
   getFontPref, applyFont, getDensityPref, applyDensity, getAmbientPref, applyAmbient,
   getAcrylicPref, applyAcrylic, getNavStylePref, setNavStylePref, applyNavStyle, NavStyle,
-  getBackgroundConfig, applyBackgroundConfig,
 } from "./lib/settings";
 import { trackItemOpened } from "./lib/viewMemory";
-import { getCustomThemeState, applyCustomTheme, activeTheme, reloadCustomCss } from "./lib/theme";
+import { reloadCustomCss } from "./lib/theme";
+import { themeStore, useThemeStore } from "./lib/themeStore";
 import { ConnectionsPanel, Toasts, ShortcutsOverlay } from "./components/shared";
 import { fsImportNoteFile, fsImportFile } from "./ipc/fs";
 import { Dashboard } from "./components/Dashboard";
@@ -25,6 +23,7 @@ import { NotesModule, TimelineModule, LibraryModule, VaultModule, AutomationModu
 import { TasksModule, ProjectsModule, HabitsModule, CalendarModule, BookmarksModule, FilesModule } from "./components/Modules2";
 import { SettingsModule } from "./components/Settings";
 import { CommandPalette } from "./components/CommandPalette";
+import { ThemeStudio } from "./components/ThemeStudio";
 import { SplitBrainVerifier } from "./lib/splitBrainVerifier";
 import { TopNav } from "./components/TopNav";
 
@@ -86,11 +85,11 @@ export function App() {
   const [inspectId, setInspectId] = useState<string | null>(null);
   const [palette, setPalette] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [themeStudioOpen, setThemeStudioOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [themePref, setThemePrefState] = useState<ThemePref>("dark");
-  const [resolved, setResolved] = useState<Resolved>("dark");
-  const [accent, setAccentState] = useState<string>("violet");
+  // Theme system state lives in one store (active theme, accent, custom theme, bg).
+  const { themePref, resolved, accent } = useThemeStore();
   const [dashEditing, setDashEditing] = useState(false);
   const [ready, setReady] = useState(false);
   const [dragTargetId, setDragTargetId] = useState<string | null>(null);
@@ -132,30 +131,25 @@ export function App() {
   // Load startup settings once on mount
   useEffect(() => {
     Promise.all([
-      getStartupView(), getThemePref(), getAccentPref(),
+      getStartupView(),
       getFontPref(), getDensityPref(), getAmbientPref(),
-      getAcrylicPref(), getNavStylePref(), getBackgroundConfig()
-    ]).then(([startup, theme, acc, font, density, ambient, acrylic, navSt, bgConf]) => {
+      getAcrylicPref(), getNavStylePref(),
+      // Loads + applies theme, accent, custom theme and background in one place.
+      themeStore.init(),
+    ]).then(([startup, font, density, ambient, acrylic, navSt]) => {
       // A pop-out window carries ?view= — honour it over the configured startup view.
       if (!initialParams?.get("view")) setView(startup as View);
-      setThemePrefState(theme as string);
-      setAccentState(acc as string);
       applyFont(font as string);
       applyDensity(density as any);
       applyAmbient(ambient as boolean);
       applyAcrylic(acrylic as boolean);
       applyNavStyle(navSt as NavStyle);
       setNavStyleState(navSt as NavStyle);
-      applyBackgroundConfig(bgConf as any);
       setReady(true);
     });
-    // Apply the saved custom theme (design-token overrides) on launch, if enabled.
-    getCustomThemeState().then((st) => applyCustomTheme(activeTheme(st), st.enabled));
-    // Inject user CSS from the Custom CSS folder, and live-reload it whenever the window
-    // regains focus so external edits show up without a restart.
+    // Inject user CSS from the Custom CSS folder at launch. Live changes propagate via
+    // the themeStore sync event (Reload CSS button), not a focus hook.
     reloadCustomCss();
-    const onFocus = () => { reloadCustomCss(); };
-    window.addEventListener("focus", onFocus);
 
     // Global Parallax listener
     const onMove = (e: MouseEvent) => {
@@ -170,29 +164,11 @@ export function App() {
 
     return () => {
       window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("focus", onFocus);
     };
   }, []);
 
-  // Resolve + apply theme; persist the preference; track the OS scheme when "system".
-  useEffect(() => {
-    if (!ready) return;
-    persistThemePref(themePref);
-    const apply = () => { const r = resolveTheme(themePref); setResolved(r); applyResolvedTheme(r); };
-    apply();
-    if (themePref === "system" && window.matchMedia) {
-      const mq = window.matchMedia("(prefers-color-scheme: dark)");
-      mq.addEventListener("change", apply);
-      return () => mq.removeEventListener("change", apply);
-    }
-  }, [themePref, ready]);
-
-  // Apply + persist the accent hue.
-  useEffect(() => {
-    if (!ready) return;
-    applyAccent(accent);
-    persistAccentPref(accent);
-  }, [accent, ready]);
+  // Theme resolve/persist/OS-scheme-tracking and accent apply/persist all live in
+  // themeStore now (setThemePref / setAccent / init). App just reads the store.
 
   // Global shortcut handler — bindings come from the canonical SHORTCUTS list.
   useEffect(() => {
@@ -336,36 +312,37 @@ export function App() {
 
   const openPalette = useCallback(() => setPalette(true), []);
   const editDash = useCallback(() => { setDashEditing(true); setView("dashboard"); }, []);
-  const setTheme = useCallback((p: ThemePref) => setThemePrefState(p), []);
+  const setTheme = useCallback((p: ThemePref) => themeStore.setThemePref(p), []);
   // Toggle flips between light and the most recent dark-family theme.
   const lastDarkRef = useRef<string>("dark");
   useEffect(() => { if (themeFamily(resolved) === "dark") lastDarkRef.current = resolved; }, [resolved]);
   const toggleTheme = useCallback(
-    () => setThemePrefState(themeFamily(resolved) === "dark" ? "light" : lastDarkRef.current),
+    () => themeStore.setThemePref(themeFamily(resolved) === "dark" ? "light" : lastDarkRef.current),
     [resolved]
   );
-  const setAccent = useCallback((a: string) => setAccentState(a), []);
+  const setAccent = useCallback((a: string) => themeStore.setAccent(a), []);
 
   const showShortcuts = useCallback(() => setShortcutsOpen(true), []);
+  const openThemeStudio = useCallback(() => setThemeStudioOpen(true), []);
   const setNavStyle = useCallback(async (style: NavStyle) => {
     await setNavStylePref(style);
     setNavStyleState(style);
     applyNavStyle(style);
   }, []);
-  const ctx = { navigate, inspect, toast, openPalette, editDash, showShortcuts, toggleTheme, themePref, setTheme, accent, setAccent, dragTargetId, setDragTargetId, navStyle, setNavStyle };
+  const ctx = { navigate, inspect, toast, openPalette, editDash, showShortcuts, openThemeStudio, toggleTheme, themePref, setTheme, accent, setAccent, dragTargetId, setDragTargetId, navStyle, setNavStyle };
 
   // The single action registry — built once from the app's real mutators/navigation
   // and provided so the palette, keyboard, and automation all dispatch through it.
   const actionsApi = useMemo(
     () => makeActionsApi({ 
       create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme,
-      setNavStyle,
+      setNavStyle, openThemeStudio,
       setDensity: (mode) => {
         applyDensity(mode);
         import("./lib/settings").then(s => s.setDensityPref(mode));
       }
     }),
-    [create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme, setNavStyle],
+    [create, navigate, inspect, toast, editDash, showShortcuts, toggleTheme, setNavStyle, openThemeStudio],
   );
 
   if (!ready) return null;
@@ -551,6 +528,9 @@ export function App() {
         </AnimatePresence>
         <AnimatePresence>
           {shortcutsOpen && <ShortcutsOverlay key="shortcuts" onClose={() => setShortcutsOpen(false)} />}
+        </AnimatePresence>
+        <AnimatePresence>
+          {themeStudioOpen && <ThemeStudio key="theme-studio" onClose={() => setThemeStudioOpen(false)} />}
         </AnimatePresence>
         <Toasts items={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
         {import.meta.env.DEV && <SplitBrainVerifier />}

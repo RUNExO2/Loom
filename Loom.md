@@ -265,11 +265,11 @@ wedge no cloud incumbent can copy).
 
 # PHASE 7 — Local AI & Knowledge Intelligence 🆕
 
-**Expected Impact: The competitive wedge. Effort: Medium. Ollama is already wired in.**
+**Expected Impact: The competitive wedge. Effort: Medium. Local model integration.**
 
 ### Includes
 - **Local embeddings index + semantic search** (fully offline). `[A10]`
-- **"Chat with your workspace" — RAG that walks the `links` graph** ("summarize everything connected to this project"). `[A11][F2]`
+- **"Chat with your workspace" — RAG that walks the `links` graph** ("query everything connected to this project"). `[A11][F2]`
 - **Auditable / undoable AI edits** using the mutation ledger for provenance ("AI did X — undo"). `[F5]`
 - **Natural-language automation builder** — local LLM compiles intent to automation rules. `[F24]`
 - **"Explain this graph cluster"** with the local model. `[F17]`
@@ -281,7 +281,7 @@ wedge no cloud incumbent can copy).
 >
 > **Requirements:**
 > 1. Build a local embeddings index over notes + indexed file text, updated by the background pipeline (not the DB thread). Semantic search ranks alongside FTS.
-> 2. RAG grounded in retrieval that follows the `links` graph (cross-domain: notes, tasks, projects, media), all via the local model (Ollama).
+> 2. RAG grounded in retrieval that follows the `links` graph (cross-domain: notes, tasks, projects, media), all via the local model.
 > 3. Every AI mutation is recorded in the mutation ledger with provenance and is undoable.
 > 4. Optional: an NL→rules automation builder reusing the (now fixed) automation engine.
 >
@@ -477,7 +477,7 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 |F11|One-keystroke OS-wide capture to Today|Medium|2/6|
 |F12|Project = live rollup of linked items|Medium|2/3|
 |F13|Habit+calendar+task fusion (run your day from notes)|Medium|2/4|
-|F14|Local model choice (Ollama) per task|Easy|7|
+|F14|Local model choice per task|Easy|7|
 |F15|Privacy-reviewed plugin marketplace|Hard|8|
 |F16|Graph-aware search ranking|Medium|3|
 |F17|"Explain this graph cluster" (local AI)|Medium|7|
@@ -515,7 +515,7 @@ original Phase 1–4 "Includes" are marked **(orig)**.
 
 **Phase 6 — Sync & mobile.**
 
-**Phase 7 — Local AI** (the wedge; Ollama already wired).
+**Phase 7 — Local AI** (the wedge; local model already wired).
 
 **Phase 8 — Extensibility** (plugins, clipper, importers).
 

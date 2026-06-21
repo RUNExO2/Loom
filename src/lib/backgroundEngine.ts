@@ -235,25 +235,18 @@ export async function processBackground(imageUrl: string): Promise<BackgroundPro
               else if (avgLuminance > 0.4) overlayOpacity = 0.65;
               else if (avgLuminance < 0.15) overlayOpacity = 0.2; // Very dark image needs minimal overlay
               
-              // The CSS variables for Smart Region Handling
               const cssVars = {
-                "--bg-luminance": avgLuminance.toFixed(3),
-                "--bg-variance": stdDev.toFixed(3),
-                
-                // Base blurs for regions
+                // Global background scrim (consumed by #loom-bg-engine::after)
+                "--bg-overlay": overlayOpacity.toFixed(3),
+                "--bg-blur": baseBlur + "px",
+
+                // Per-region acrylic (consumed by [data-acrylic="on"] rules)
                 "--region-blur-nav": "blur(" + (baseBlur + 12) + "px) saturate(180%)",
                 "--region-blur-card": "blur(" + baseBlur + "px) saturate(140%)",
-                "--region-blur-content": "blur(" + Math.max(4, baseBlur - 8) + "px) saturate(120%)",
                 "--region-blur-modal": "blur(" + (baseBlur + 20) + "px) saturate(200%)",
-                
-                // Base overlay opacities
                 "--region-overlay-nav": "color-mix(in oklch, var(--glass) " + Math.round(overlayOpacity * 100) + "%, transparent)",
                 "--region-overlay-card": "color-mix(in oklch, var(--surface-1) " + Math.round(overlayOpacity * 100) + "%, transparent)",
-                "--region-overlay-content": "color-mix(in oklch, var(--bg) " + Math.round(overlayOpacity * 100 + 10) + "%, transparent)",
-                "--region-overlay-modal": "color-mix(in oklch, var(--surface-2) " + Math.round((overlayOpacity + 0.1) * 100) + "%, transparent)",
-                
-                // Optional global tinting
-                "--bg-tint": surfaceTint
+                "--region-overlay-modal": "color-mix(in oklch, var(--surface-2) " + Math.round((overlayOpacity + 0.1) * 100) + "%, transparent)"
               };
               
               self.postMessage({
@@ -387,17 +380,14 @@ function runExtractionSync(data: Uint8ClampedArray): BackgroundProfile {
   else if (avgLuminance < 0.15) overlayOpacity = 0.2;
   
   const cssVars = {
-    "--bg-luminance": avgLuminance.toFixed(3),
-    "--bg-variance": stdDev.toFixed(3),
+    "--bg-overlay": overlayOpacity.toFixed(3),
+    "--bg-blur": `${baseBlur}px`,
     "--region-blur-nav": `blur(${baseBlur + 12}px) saturate(180%)`,
     "--region-blur-card": `blur(${baseBlur}px) saturate(140%)`,
-    "--region-blur-content": `blur(${Math.max(4, baseBlur - 8)}px) saturate(120%)`,
     "--region-blur-modal": `blur(${baseBlur + 20}px) saturate(200%)`,
     "--region-overlay-nav": `color-mix(in oklch, var(--glass) ${Math.round(overlayOpacity * 100)}%, transparent)`,
     "--region-overlay-card": `color-mix(in oklch, var(--surface-1) ${Math.round(overlayOpacity * 100)}%, transparent)`,
-    "--region-overlay-content": `color-mix(in oklch, var(--bg) ${Math.round(overlayOpacity * 100 + 10)}%, transparent)`,
-    "--region-overlay-modal": `color-mix(in oklch, var(--surface-2) ${Math.round((overlayOpacity + 0.1) * 100)}%, transparent)`,
-    "--bg-tint": surfaceTint
+    "--region-overlay-modal": `color-mix(in oklch, var(--surface-2) ${Math.round((overlayOpacity + 0.1) * 100)}%, transparent)`
   };
   
   return {

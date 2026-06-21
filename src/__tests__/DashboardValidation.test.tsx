@@ -72,6 +72,7 @@ describe("Phase 5 Dashboard React Runtime Validation", () => {
     openPalette: vi.fn(),
     editDash: vi.fn(),
     showShortcuts: vi.fn(),
+    openThemeStudio: vi.fn(),
     toggleTheme: vi.fn(),
     themePref: "auto" as any,
     setTheme: vi.fn(),

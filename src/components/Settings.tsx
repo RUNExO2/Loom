@@ -11,7 +11,7 @@ import {
 import { useItemStore } from "../lib/itemStore";
 import { defaultDashboardLayout } from "./Dashboard";
 import { optimizeDatabase, importNotesFromFolder, importObsidianVault, revealCustomCssFolder } from "../ipc/content";
-import { reloadCustomCss } from "../lib/theme";
+import { themeStore } from "../lib/themeStore";
 import { WORKSPACE_TEMPLATES, applyWorkspaceTemplate } from "../lib/templates";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { exportData, backupDatabase, importData, clearAllUserData } from "../ipc/settings";
@@ -19,9 +19,7 @@ import { exportWorkspaceArchive, importWorkspaceArchive } from "../ipc/workspace
 import { useModal } from "./Modal";
 import { freezeMutations, unfreezeMutations } from "../lib/mutationGuard";
 import { Button } from "./ui/Button";
-import { ThemeStudio } from "./ThemeStudio";
 import { RecoveryPanel } from "./RecoveryPanel";
-import { AnimatePresence } from "framer-motion";
 import * as Switch from "@radix-ui/react-switch";
 
 function Section({ icon, title, sub, danger, children }: { icon: string; title: string; sub: string; danger?: boolean; children: React.ReactNode }) {
@@ -42,7 +40,7 @@ function Section({ icon, title, sub, danger, children }: { icon: string; title: 
 }
 
 export function SettingsModule() {
-  const { toast, themePref, setTheme, accent, setAccent, navStyle, setNavStyle } = useLoom();
+  const { toast, themePref, setTheme, accent, setAccent, navStyle, setNavStyle, openThemeStudio } = useLoom();
   const modal = useModal();
   const { workspaceId, saveDashboard, refresh } = useItemStore();
   const [startup, setStartup] = useState<string>("dashboard");
@@ -51,7 +49,6 @@ export function SettingsModule() {
   const [density, setDensity] = useState<string>("comfortable");
   const [ambient, setAmbient] = useState<boolean>(false);
   const [acrylic, setAcrylicState] = useState<boolean>(false);
-  const [themeStudio, setThemeStudio] = useState(false);
 
   useEffect(() => {
     getStartupView().then(setStartup);
@@ -415,17 +412,17 @@ export function SettingsModule() {
               <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Custom Theme</div>
               <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Design tokens for color, typography, shape, and effects — live preview, no restart. Save, export, and import multiple themes.</div>
             </div>
-            <Button iconLeft="ph-paint-brush-broad" onClick={() => setThemeStudio(true)}>Open Theme Studio</Button>
+            <Button iconLeft="ph-paint-brush-broad" onClick={openThemeStudio}>Open Theme Studio</Button>
           </div>
           <div className="divider"></div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
               <div style={{ fontWeight: 550, fontSize: "var(--fs-md)" }}>Custom CSS</div>
-              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Drop .css files in the Custom CSS folder. They reload automatically when Loom regains focus, or reload now.</div>
+              <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Drop .css files in the Custom CSS folder, then reload. Reloading applies to every open window.</div>
             </div>
             <div className="row gap6">
               <Button iconLeft="ph-folder-open" onClick={() => revealCustomCssFolder().catch(console.error)}>Open folder</Button>
-              <Button iconLeft="ph-arrows-clockwise" onClick={async () => { await reloadCustomCss(); toast("Custom CSS reloaded", "ph-arrows-clockwise"); }}>Reload CSS</Button>
+              <Button iconLeft="ph-arrows-clockwise" onClick={async () => { await themeStore.reloadCss(); toast("Custom CSS reloaded", "ph-arrows-clockwise"); }}>Reload CSS</Button>
             </div>
           </div>
         </div>
@@ -592,10 +589,6 @@ export function SettingsModule() {
           </Button>
         </div>
       </Section>
-
-      <AnimatePresence>
-        {themeStudio && <ThemeStudio onClose={() => setThemeStudio(false)} />}
-      </AnimatePresence>
     </div>
   );
 }
