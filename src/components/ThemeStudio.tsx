@@ -10,6 +10,7 @@ import { BackgroundPanel } from "./themestudio/BackgroundPanel";
 import { NavPanel } from "./themestudio/NavPanel";
 import { PaletteHistory } from "./themestudio/PaletteHistory";
 import { TokenControls } from "./themestudio/TokenControls";
+import { DiagnosticsPanel } from "./themestudio/DiagnosticsPanel";
 import { LivePreview } from "./themestudio/LivePreview";
 
 // Full theme customiser. A thin composition shell: all state/logic lives in
@@ -66,11 +67,12 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
         {/* Two-pane body: controls | living specimen */}
         <div className="ts-body">
           <div className="ts-controls">
-            <PresetGallery onApply={s.applyPreset} />
+            <PresetGallery presets={s.themes} activeId={s.activeId} onSelect={s.selectTheme} />
             <PaletteHistory history={s.history} onRestore={s.restoreHistory} />
             <BackgroundPanel />
             <NavPanel />
             <TokenControls tokens={s.tokens} effective={s.effective} updateToken={s.updateToken} onHover={setHi} />
+            <DiagnosticsPanel tokens={s.tokens} />
           </div>
 
           {/* Living specimen */}
@@ -89,7 +91,8 @@ export function ThemeStudio({ onClose }: { onClose: () => void }) {
           <button className="btn sm" onClick={s.reset} title="Clear all overrides in this theme"><I n="ph-arrow-counter-clockwise" /> Reset</button>
           <button className="btn sm" onClick={s.copyCss} title="Copy theme as CSS variables"><I n="ph-clipboard-text" /> Copy CSS</button>
           <button className="btn sm" onClick={s.importTheme}><I n="ph-upload-simple" /> Import</button>
-          <button className="btn sm primary" onClick={s.exportTheme}><I n="ph-download-simple" /> Export</button>
+          <button className="btn sm" onClick={s.exportThemeCss}><I n="ph-download-simple" /> Export CSS</button>
+          <button className="btn sm primary" onClick={s.exportTheme}><I n="ph-download-simple" /> Export JSON</button>
         </div>
       </div>
     </OverlayShell>

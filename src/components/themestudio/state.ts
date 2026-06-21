@@ -14,7 +14,7 @@ import {
   newTheme, serializeTheme, parseTheme,
   ThemePreset, randomTheme, themeToCss,
 } from "../../lib/theme";
-import { getSetting, setSetting } from "../../ipc/items";
+import { getSetting, setSetting, saveThemePreset, deleteThemePreset, duplicateThemePreset, renameThemePreset } from "../../ipc/items";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { fsWriteAnyFile, fsReadNoteContent } from "../../ipc/fs";
 import { themeStore } from "../../lib/themeStore";
@@ -73,6 +73,7 @@ export interface ThemeStudioApi {
   applyPreset: (p: ThemePreset) => Promise<void>;
   surprise: () => void;
   exportTheme: () => Promise<void>;
+  exportThemeCss: () => Promise<void>;
   importTheme: () => Promise<void>;
   copyCss: () => Promise<void>;
   restoreHistory: (e: PaletteEntry) => void;
@@ -107,19 +108,42 @@ export function useThemeStudio(): ThemeStudioApi {
     themeStore.setCustomTheme(themes.find((t) => t.id === activeId) || null, enabled);
   }, [loaded, enabled, activeId, themes]);
 
-  // Persist token edits, debounced — a slider drag must not hammer the settings table.
+  // Persist active theme edits, debounced to SQLite database
   const saveTimer = useRef<number | undefined>(undefined);
-  // ponytail: track pending save so unmount can flush it before the timer fires
-  const pendingSave = useRef<{ themes: CustomTheme[] } | null>(null);
+  const pendingSave = useRef<CustomTheme | null>(null);
+
+  const saveActiveTheme = useCallback(async (theme: CustomTheme) => {
+    try {
+      await saveThemePreset({
+        id: theme.id,
+        name: theme.name,
+        blurb: theme.blurb,
+        tokens: JSON.stringify(theme.tokens),
+      });
+    } catch (e) {
+      console.error("Failed to save theme preset:", e);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!loaded) return;
-    pendingSave.current = { themes };
+    if (!loaded || !current) return;
+    pendingSave.current = current;
     window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => { saveCustomThemes(themes); pendingSave.current = null; }, 300);
+    saveTimer.current = window.setTimeout(async () => {
+      if (pendingSave.current) {
+        await saveActiveTheme(pendingSave.current);
+        pendingSave.current = null;
+      }
+    }, 300);
     return () => window.clearTimeout(saveTimer.current);
-  }, [themes, loaded]);
-  // Flush any debounce-pending save when ThemeStudio closes (prevents data loss on fast close).
-  useEffect(() => () => { if (pendingSave.current) saveCustomThemes(pendingSave.current.themes); }, []);
+  }, [current, loaded, saveActiveTheme]);
+
+  // Flush any pending save when ThemeStudio closes
+  useEffect(() => () => {
+    if (pendingSave.current) {
+      saveActiveTheme(pendingSave.current);
+    }
+  }, [saveActiveTheme]);
 
   const patchCurrent = useCallback((tokens: Record<string, string>) => {
     setThemes((prev) => prev.map((t) => (t.id === activeId ? { ...t, tokens } : t)));
@@ -149,25 +173,77 @@ export function useThemeStudio(): ThemeStudioApi {
 
   const toggleEnabled = (on: boolean) => { setEnabled(on); setCustomThemeEnabled(on); };
   const selectTheme = (id: string) => { setActiveId(id); setActiveCustomTheme(id); };
-  const addTheme = () => { const t = newTheme(`Theme ${themes.length + 1}`); setThemes([...themes, t]); selectTheme(t.id); };
-  const duplicate = () => {
+  const addTheme = async () => {
+    const t = newTheme(`Theme ${themes.length + 1}`);
+    try {
+      await saveThemePreset({
+        id: t.id,
+        name: t.name,
+        blurb: t.blurb,
+        tokens: JSON.stringify(t.tokens),
+      });
+      setThemes((prev) => [...prev, t]);
+      selectTheme(t.id);
+    } catch (e) {
+      toast("Failed to create theme preset", "ph-warning");
+    }
+  };
+  const duplicate = async () => {
     if (!current) return;
-    const t: CustomTheme = { ...newTheme(`${current.name} copy`), tokens: { ...current.tokens } };
-    setThemes([...themes, t]); selectTheme(t.id);
+    const newId = newThemeId();
+    const newName = `${current.name} copy`;
+    try {
+      await duplicateThemePreset(current.id, newId, newName);
+      const t: CustomTheme = {
+        id: newId,
+        name: newName,
+        blurb: current.blurb,
+        tokens: { ...current.tokens },
+      };
+      setThemes((prev) => [...prev, t]);
+      selectTheme(newId);
+      toast(`Duplicated "${current.name}"`, "ph-copy");
+    } catch (e) {
+      toast("Failed to duplicate theme preset", "ph-warning");
+    }
   };
   const rename = async () => {
     if (!current) return;
     const r = await modal.form({ panel: true, title: "Rename theme", icon: "ph-pencil", accent: "var(--accent)", submitLabel: "Rename", fields: [{ name: "name", label: "Name", defaultValue: current.name, required: true }] });
     if (!r) return;
-    setThemes(themes.map((t) => (t.id === current.id ? { ...t, name: r.name } : t)));
+    try {
+      await renameThemePreset(current.id, r.name);
+      setThemes((prev) => prev.map((t) => (t.id === current.id ? { ...t, name: r.name } : t)));
+      toast("Theme renamed", "ph-pencil");
+    } catch (e) {
+      toast("Failed to rename theme preset", "ph-warning");
+    }
   };
   const del = async () => {
     if (!current) return;
     const ok = await modal.confirm({ title: "Delete theme", message: `Delete "${current.name}"?`, icon: "ph-trash", danger: true, confirmLabel: "Delete" });
     if (!ok) return;
-    const list = themes.filter((t) => t.id !== current.id);
-    if (list.length === 0) { const t = newTheme("My theme"); setThemes([t]); selectTheme(t.id); }
-    else { setThemes(list); selectTheme(list[0].id); }
+    try {
+      await deleteThemePreset(current.id);
+      const list = themes.filter((t) => t.id !== current.id);
+      if (list.length === 0) {
+        const t = newTheme("My theme");
+        await saveThemePreset({
+          id: t.id,
+          name: t.name,
+          blurb: t.blurb,
+          tokens: JSON.stringify(t.tokens),
+        });
+        setThemes([t]);
+        selectTheme(t.id);
+      } else {
+        setThemes(list);
+        selectTheme(list[0].id);
+      }
+      toast("Theme deleted", "ph-trash");
+    } catch (e) {
+      toast("Failed to delete theme preset", "ph-warning");
+    }
   };
   const reset = async () => {
     if (!current) return;
@@ -212,12 +288,32 @@ export function useThemeStudio(): ThemeStudioApi {
       toast("Theme exported", "ph-download-simple");
     } catch (e) { console.error("Theme export failed:", e); toast("Export failed  -  check file permissions", "ph-warning"); }
   };
+  const exportThemeCss = async () => {
+    if (!current) return;
+    const safe = current.name.replace(/[^\w-]+/g, "_") || "theme";
+    try {
+      const path = await save({ defaultPath: `${safe}.theme.css`, filters: [{ name: "CSS Theme", extensions: ["css"] }] });
+      if (!path) return;
+      await fsWriteAnyFile(path, themeToCss(tokens));
+      toast("Theme CSS exported", "ph-download-simple");
+    } catch (e) { console.error("Theme CSS export failed:", e); toast("Export failed  -  check file permissions", "ph-warning"); }
+  };
   const importTheme = async () => {
     try {
       const sel = await open({ multiple: false, filters: [{ name: "LOOM theme", extensions: ["json"] }] });
       if (!sel || typeof sel !== "string") return;
       const t = parseTheme(await fsReadNoteContent(sel));
-      setThemes((prev) => [...prev, t]); selectTheme(t.id);
+
+      // Persist locally in the database and trigger backend validation
+      await saveThemePreset({
+        id: t.id,
+        name: t.name,
+        blurb: t.blurb,
+        tokens: JSON.stringify(t.tokens),
+      });
+
+      setThemes((prev) => [...prev, t]);
+      selectTheme(t.id);
       if (!enabled) toggleEnabled(true);
       toast(`Imported "${t.name}"`, "ph-upload-simple");
     } catch (e) {
@@ -238,6 +334,6 @@ export function useThemeStudio(): ThemeStudioApi {
   return {
     loaded, enabled, themes, activeId, current, tokens, overrideCount, effective, history,
     toggleEnabled, selectTheme, addTheme, duplicate, rename, del, reset,
-    updateToken, applyPreset, surprise, exportTheme, importTheme, copyCss, restoreHistory,
+    updateToken, applyPreset, surprise, exportTheme, exportThemeCss, importTheme, copyCss, restoreHistory,
   };
 }

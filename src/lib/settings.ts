@@ -100,14 +100,30 @@ export type NavStyle = "sidebar" | "top-pill";
 
 import { BackgroundProfile } from "./backgroundEngine";
 
+export type BgFit = "cover" | "contain" | "fill" | "center";
+
 export interface BackgroundConfig {
   bgImage: string | null;          // stored: relative "backgrounds/…" or null
   bgDynamic: boolean;
   bgUseColors: boolean;
   bgParallax: boolean;
   profile: BackgroundProfile | null;
+  // ── Manual image controls (independent of the readability engine) ──
+  fit: BgFit;                      // cover | contain | fill | center
+  blur: number;                    // px, 0..40
+  opacity: number;                 // 0..1
+  brightness: number;              // 0..2 (1 = unchanged)
+  contrast: number;                // 0..2
+  saturation: number;              // 0..2
   _resolvedPath?: string | null;   // runtime-only: absolute path for convertFileSrc, never persisted
 }
+
+// Single source of defaults — merged over any stored config so old/partial
+// configs gain the new fields automatically (forward migration for free).
+export const DEFAULT_BG_CONFIG: BackgroundConfig = {
+  bgImage: null, bgDynamic: true, bgUseColors: true, bgParallax: true, profile: null,
+  fit: "cover", blur: 0, opacity: 1, brightness: 1, contrast: 1, saturation: 1,
+};
 
 /** True for old-format absolute paths (Windows drive letter or Unix root). */
 const isAbsolutePath = (p: string) => /^[a-zA-Z]:/.test(p) || p.startsWith('/') || p.startsWith('\\');
@@ -185,7 +201,7 @@ export function applyNavStyle(style: NavStyle) {
 
 export async function getBackgroundConfig(): Promise<BackgroundConfig> {
   const v = await getSetting(BG_CONFIG_KEY);
-  const def: BackgroundConfig = { bgImage: null, bgDynamic: true, bgUseColors: true, bgParallax: true, profile: null };
+  const def: BackgroundConfig = { ...DEFAULT_BG_CONFIG };
   if (!v) return def;
   let config: BackgroundConfig;
   try { config = { ...def, ...(JSON.parse(v) as Partial<BackgroundConfig>) }; }

@@ -236,8 +236,14 @@
   --r-2xs: calc(3px * var(--radius-scale)); --r-xs: calc(6px * var(--radius-scale)); --r-sm: calc(8px * var(--radius-scale)); --r-md: calc(10px * var(--radius-scale));
   --r-lg: calc(13px * var(--radius-scale)); --r-xl: calc(16px * var(--radius-scale)); --r-2xl: calc(18px * var(--radius-scale)); --r-full: 999px;
 
-  /* motion */
-  --dur-fast: 120ms; --dur-base: 160ms; --dur-slow: 220ms;
+  /* motion — every transition/animation references these three tokens, so the Theme
+     Studio Motion controls scale all of them at once. --motion-scale = speed multiplier
+     (higher = slower); --motion-enabled = 0 zeroes every duration (animations off). */
+  --motion-scale: 1;
+  --motion-enabled: 1;
+  --dur-fast: calc(120ms * var(--motion-scale, 1) * var(--motion-enabled, 1));
+  --dur-base: calc(160ms * var(--motion-scale, 1) * var(--motion-enabled, 1));
+  --dur-slow: calc(220ms * var(--motion-scale, 1) * var(--motion-enabled, 1));
   --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -285,11 +291,11 @@ body {
   color: var(--text);
   font-size: var(--fs-base);
   font-weight: var(--ui-weight, 400);
-  line-height: 1.45;
+  line-height: var(--line-height, 1.45);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--letter-spacing, -0.01em);
 }
 /* Text selection colour — overridable by the custom theme engine (--selection-bg). */
 ::selection { background: var(--selection-bg, var(--accent-soft)); color: var(--text); }
@@ -347,11 +353,19 @@ input, textarea { font-family: inherit; color: inherit; }
   height: 100vh;
   display: flex;
   flex-direction: column;
+  /* --bg-opacity lets a background image bleed through the solid fill (relative color
+     keeps the theme hue, just drops alpha). Defaults to 1 = unchanged. */
   background:
     radial-gradient(1200px 800px at 78% -10%, var(--bg-grad-a), transparent 60%),
     radial-gradient(900px 700px at 0% 110%, var(--bg-grad-b), transparent 55%),
-    var(--bg);
+    rgb(from var(--bg) r g b / var(--bg-opacity, 1));
   overflow: hidden;
+  /* Window frame controls. All inert at defaults (radius 0, border 0, shadow 0) so the
+     stock look is untouched; the OS still draws the real window shadow (decorations on),
+     hence shadow strength is an inner vignette rather than a drop shadow. */
+  border-radius: var(--win-radius, 0px);
+  border: var(--win-border-width, 0px) solid rgb(from var(--border-strong) r g b / var(--win-border-opacity, 1));
+  box-shadow: inset 0 0 calc(70px * var(--win-shadow-strength, 0)) rgba(0, 0, 0, calc(0.5 * var(--win-shadow-strength, 0)));
   transition: background 0.8s ease;
 }
 
@@ -361,7 +375,7 @@ input, textarea { font-family: inherit; color: inherit; }
   flex: 0 0 40px;
   display: flex;
   align-items: stretch;
-  background: var(--glass-strong);
+  background: color-mix(in oklch, var(--glass-strong) calc(100% * var(--surface-opacity, 1)), transparent);
   backdrop-filter: blur(30px) saturate(1.4);
   -webkit-backdrop-filter: blur(30px) saturate(1.4);
   border-bottom: 1px solid var(--border-faint);
@@ -459,7 +473,7 @@ input, textarea { font-family: inherit; color: inherit; }
 .sidebar {
   flex: 0 0 244px;
   display: flex; flex-direction: column;
-  background: var(--surface-1);
+  background: color-mix(in oklch, var(--surface-1) calc(100% * var(--surface-opacity, 1)), transparent);
   border-right: 1px solid var(--border-faint);
   padding: 10px 10px 8px;
   transition: flex-basis var(--dur-slow) var(--ease-out);
@@ -611,7 +625,7 @@ input, textarea { font-family: inherit; color: inherit; }
   align-items: stretch;
 }
 .widget {
-  background: color-mix(in oklch, var(--surface-1) 70%, transparent);
+  background: color-mix(in oklch, var(--surface-1) calc(70% * var(--card-opacity, 1)), transparent);
   backdrop-filter: blur(12px) saturate(1.2);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-2xl);
@@ -1776,6 +1790,23 @@ html { scroll-behavior: smooth; }
 .ts-group-h { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; font-family: "SF Mono", ui-monospace, monospace; font-size: var(--fs-2xs); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-ghost); }
 .ts-group-h i { font-size: var(--fs-base); color: var(--accent-text); }
 
+/* diagnostics */
+.ts-diag-ok { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--sys-success); padding: 8px 10px; border: 1px solid color-mix(in oklch, var(--sys-success) 35%, transparent); border-radius: var(--r-md); background: color-mix(in oklch, var(--sys-success) 10%, transparent); }
+.ts-diag-ok i { font-size: var(--fs-lg); flex-shrink: 0; }
+.ts-diag-list { display: flex; flex-direction: column; gap: 8px; }
+.ts-diag-sum { letter-spacing: 0.08em; text-transform: uppercase; }
+.ts-diag { display: flex; gap: 9px; padding: 9px 10px; border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-1); }
+.ts-diag > i { font-size: var(--fs-lg); flex-shrink: 0; margin-top: 1px; }
+.ts-diag.error { border-color: color-mix(in oklch, var(--sys-danger) 45%, transparent); }
+.ts-diag.error > i { color: var(--sys-danger); }
+.ts-diag.warn { border-color: color-mix(in oklch, var(--sys-warning) 45%, transparent); }
+.ts-diag.warn > i { color: var(--sys-warning); }
+.ts-diag-tx { min-width: 0; }
+.ts-diag-cat { font-size: var(--fs-2xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-ghost); }
+.ts-diag-msg { font-size: var(--fs-sm); color: var(--text); margin-top: 2px; }
+.ts-diag-fix { font-size: var(--fs-xs); color: var(--text-dim); margin-top: 4px; display: flex; gap: 5px; align-items: baseline; }
+.ts-diag-fix i { color: var(--accent-text); flex-shrink: 0; }
+
 /* preset gallery */
 .ts-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
 .ts-preset { display: flex; flex-direction: column; gap: 6px; padding: 9px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-1); cursor: pointer; text-align: left; transition: border-color var(--dur-fast), transform 120ms, background var(--dur-fast), box-shadow 120ms; }
@@ -1964,23 +1995,29 @@ html { scroll-behavior: smooth; }
 /* ── PREMIUM BACKGROUND ENGINE ── */
 #loom-bg-engine {
   position: fixed;
-  /* extend beyond bounds so blur/parallax doesn't clip */
+  /* extend beyond bounds so blur/parallax doesn't clip the edges */
   inset: -50px;
   z-index: -100;
-  background-size: cover;
-  background-position: center;
-  /* transition parallax and background changes */
-  transition: background-image 0.8s ease, filter 0.8s ease, transform 0.2s cubic-bezier(0.2, 0, 0.4, 1);
+  background-image: var(--bg-img);
+  background-repeat: no-repeat;
+  background-size: var(--bgi-size, cover);
+  background-position: var(--bgi-pos, center);
   pointer-events: none;
   opacity: 0;
+  /* Manual image controls — applied to the photo itself, not the readability scrim. */
+  filter:
+    blur(var(--bgi-blur, 0px))
+    brightness(var(--bgi-bright, 1))
+    contrast(var(--bgi-contrast, 1))
+    saturate(var(--bgi-sat, 1));
   /* Hardware acceleration for parallax */
   transform: translate3d(calc(var(--bg-px, 0) * 1px), calc(var(--bg-py, 0) * 1px), 0);
+  transition: opacity 0.4s ease, filter 0.25s ease, transform 0.2s cubic-bezier(0.2, 0, 0.4, 1);
   will-change: transform;
 }
-/* When activated */
+/* When activated — opacity is the user's manual control. */
 [data-bg="on"] #loom-bg-engine {
-  opacity: 1;
-  background-image: var(--bg-img);
+  opacity: var(--bgi-opacity, 1);
 }
 [data-bg="on"] .app {
   background: transparent !important;

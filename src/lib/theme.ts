@@ -8,7 +8,7 @@
 // Persistence lives in the same settings table as every other UI preference. Multiple
 // named themes are stored as a list; one is active at a time.
 
-import { getSetting, setSetting } from "../ipc/items";
+import { getSetting, setSetting, getThemePresets } from "../ipc/items";
 import { getCustomCss } from "../ipc/content";
 
 // Live CSS reload: (re)inject the concatenated user CSS from the Custom CSS folder into a
@@ -52,6 +52,34 @@ export const THEME_SCHEMA: ThemeGroup[] = [
       { key: "--ui-weight", label: "Base weight", type: "select", default: "400", options: [
         { value: "300", label: "Light" }, { value: "400", label: "Regular" }, { value: "500", label: "Medium" }, { value: "600", label: "Semibold" },
       ] },
+      { key: "--letter-spacing", label: "Letter spacing", type: "scale", min: -0.04, max: 0.12, step: 0.005, default: -0.01, unit: "em", hint: "Tracking for UI prose." },
+      { key: "--line-height", label: "Line height", type: "scale", min: 1, max: 2, step: 0.05, default: 1.45 },
+    ],
+  },
+  {
+    title: "Window", icon: "ph-app-window",
+    fields: [
+      { key: "--win-radius", label: "Corner radius", type: "scale", min: 0, max: 28, step: 1, default: 0, unit: "px", hint: "Rounds the app frame." },
+      { key: "--win-border-width", label: "Border thickness", type: "scale", min: 0, max: 4, step: 0.5, default: 0, unit: "px" },
+      { key: "--win-border-opacity", label: "Border opacity", type: "scale", min: 0, max: 1, step: 0.05, default: 1 },
+      { key: "--win-shadow-strength", label: "Shadow strength", type: "scale", min: 0, max: 2, step: 0.05, default: 0, hint: "Inner vignette on the frame." },
+    ],
+  },
+  {
+    title: "Surfaces", icon: "ph-stack",
+    fields: [
+      { key: "--bg-opacity", label: "Background opacity", type: "scale", min: 0, max: 1, step: 0.05, default: 1, hint: "Lets a background image show through the app fill." },
+      { key: "--surface-opacity", label: "Surface opacity", type: "scale", min: 0, max: 1, step: 0.05, default: 1, hint: "Sidebar + titlebar chrome." },
+      { key: "--card-opacity", label: "Card opacity", type: "scale", min: 0, max: 1, step: 0.05, default: 1, hint: "Dashboard cards." },
+    ],
+  },
+  {
+    title: "Motion", icon: "ph-wave-sine",
+    fields: [
+      { key: "--motion-enabled", label: "Animations", type: "select", default: "1", options: [
+        { value: "1", label: "On" }, { value: "0", label: "Off" },
+      ] },
+      { key: "--motion-scale", label: "Animation speed", type: "scale", min: 0.25, max: 2, step: 0.05, default: 1, hint: "Higher = slower transitions." },
     ],
   },
   {
@@ -102,7 +130,14 @@ export const MANAGED_VAR_KEYS = THEME_SCHEMA
   .flatMap((g) => g.fields.map((f) => f.key))
   .filter((k) => !FX_KEYS.includes(k));
 
-export interface CustomTheme { id: string; name: string; tokens: Record<string, string>; }
+export interface CustomTheme {
+  id: string;
+  name: string;
+  blurb: string;
+  tokens: Record<string, string>;
+}
+
+export type ThemePreset = CustomTheme;
 
 const ENABLED_KEY = "loom.customTheme.enabled";
 const LIST_KEY = "loom.customTheme.list";
@@ -113,7 +148,7 @@ export interface CustomThemeState { enabled: boolean; themes: CustomTheme[]; act
 export function newThemeId(): string { return "ct_" + Math.random().toString(36).slice(2, 10); }
 
 export function newTheme(name = "My theme"): CustomTheme {
-  return { id: newThemeId(), name, tokens: {} };
+  return { id: newThemeId(), name, blurb: "", tokens: {} };
 }
 
 export function activeTheme(state: CustomThemeState): CustomTheme | null {
@@ -162,16 +197,26 @@ export function applyThemeFilter(theme: CustomTheme | null, enabled: boolean) {
 
 // ── Persistence ──
 export async function getCustomThemeState(): Promise<CustomThemeState> {
-  const [en, list, active] = await Promise.all([
-    getSetting(ENABLED_KEY), getSetting(LIST_KEY), getSetting(ACTIVE_KEY),
+  const [en, dbPresets, active] = await Promise.all([
+    getSetting(ENABLED_KEY), getThemePresets(), getSetting(ACTIVE_KEY),
   ]);
-  let themes: CustomTheme[] = [];
-  try { const parsed = list ? JSON.parse(list) : []; if (Array.isArray(parsed)) themes = parsed; } catch { /* corrupt → empty */ }
-  themes = themes.filter((t) => t && typeof t.id === "string" && typeof t.tokens === "object");
+  const themes: CustomTheme[] = dbPresets.map(p => {
+    let tokens: Record<string, string> = {};
+    try { tokens = typeof p.tokens === "string" ? JSON.parse(p.tokens) : p.tokens; } catch { /* ignore */ }
+    return {
+      id: p.id,
+      name: p.name,
+      blurb: p.blurb,
+      tokens: tokens || {},
+    };
+  });
   const activeId = active && themes.some((t) => t.id === active) ? active : (themes[0]?.id ?? null);
   return { enabled: en === "on", themes, activeId };
 }
-export async function saveCustomThemes(themes: CustomTheme[]) { await setSetting(LIST_KEY, JSON.stringify(themes)); }
+export async function saveCustomThemes(themes: CustomTheme[]) {
+  // Deprecated list setting; we now save themes individually via Tauri commands.
+  // We keep this function as a no-op to avoid breaking imports elsewhere.
+}
 export async function setCustomThemeEnabled(on: boolean) { await setSetting(ENABLED_KEY, on ? "on" : "off"); }
 export async function setActiveCustomTheme(id: string) { await setSetting(ACTIVE_KEY, id); }
 
@@ -187,20 +232,28 @@ export function parseTheme(json: string): CustomTheme {
   if (o.loomTheme !== 1) throw new Error("Not a valid LOOM theme file (missing version marker).");
   if (typeof o.tokens !== "object" || o.tokens === null || Array.isArray(o.tokens))
     throw new Error("Not a valid LOOM theme file (missing tokens).");
-  // Keep only known token keys; sanitize values to prevent CSS injection via themeToCss.
+  
   const allowed = new Set([...MANAGED_VAR_KEYS, ...FX_KEYS]);
   const tokens: Record<string, string> = {};
   for (const [k, v] of Object.entries(o.tokens as Record<string, unknown>)) {
-    if (allowed.has(k) && typeof v === "string") {
-      // ponytail: strip chars that escape CSS variable context in generated :root{} blocks
-      const clean = v.replace(/[{};]/g, "").slice(0, 500).trim();
-      if (clean) tokens[k] = clean;
+    if (!allowed.has(k)) {
+      throw new Error(`Invalid token key: '${k}'. Only official theme schema variables are allowed.`);
+    }
+    if (typeof v !== "string" && typeof v !== "number") {
+      throw new Error(`Invalid value type for token '${k}': must be a string or number.`);
+    }
+    const vStr = String(v).trim();
+    if (/[{};]/.test(vStr)) {
+      throw new Error(`Invalid characters in token '${k}' value: '${vStr}'. Values cannot contain '{', '}', or ';'.`);
+    }
+    if (vStr) {
+      tokens[k] = vStr;
     }
   }
   const name = typeof o.name === "string"
     ? o.name.replace(/[<>"]/g, "").slice(0, 100).trim() || "Imported theme"
     : "Imported theme";
-  return { id: newThemeId(), name, tokens };
+  return { id: newThemeId(), name, blurb: "Imported theme", tokens };
 }
 
 // ── Color math - contrast guard for the Studio ──────────────────────────────────
@@ -245,103 +298,9 @@ export function themeSwatch(tokens: Record<string, string>) {
   };
 }
 
-// ── Curated presets - each a complete, opinionated look applied in one click ──
-export interface ThemePreset { name: string; blurb: string; tokens: Record<string, string>; }
-export const THEME_PRESETS: ThemePreset[] = [
-  {
-    name: "Obsidian Bloom", blurb: "Ink violet · the house look",
-    tokens: {
-      "--bg": "#141019", "--surface-1": "#1d1726", "--surface-2": "#251d31", "--glass": "#17111f",
-      "--border": "#33293f", "--surface-hover": "#2a2138", "--accent": "#8b5cf6", "--selection-bg": "#8b5cf6",
-      "--text": "#f4f1f8", "--text-dim": "#bdb4c9", "--reader-bg": "#1d1726", "--reader-text": "#d6cfe0",
-      "--graph-edge": "#46395a", "--graph-label": "#f4f1f8",
-    },
-  },
-  {
-    name: "Solar Ember", blurb: "Warm charcoal · molten amber",
-    tokens: {
-      "--bg": "#17120d", "--surface-1": "#211a13", "--surface-2": "#2a2119", "--glass": "#1a140e",
-      "--border": "#3a2c1f", "--surface-hover": "#30251b", "--accent": "#f0883e", "--selection-bg": "#e0742a",
-      "--text": "#f7efe6", "--text-dim": "#cbbaa6", "--reader-bg": "#211a13", "--reader-text": "#e2d4c2",
-      "--graph-edge": "#5a4631", "--graph-label": "#f7efe6", "--font-ui": "Georgia, \"Times New Roman\", serif",
-    },
-  },
-  {
-    name: "Mint Terminal", blurb: "Near-black · phosphor green · mono",
-    tokens: {
-      "--bg": "#090d0b", "--surface-1": "#111714", "--surface-2": "#16201b", "--glass": "#0c1210",
-      "--border": "#1f2e26", "--surface-hover": "#18241d", "--accent": "#46e0a0", "--selection-bg": "#46e0a0",
-      "--text": "#e6f5ee", "--text-dim": "#9fc4b3", "--reader-bg": "#111714", "--reader-text": "#cde8db",
-      "--graph-edge": "#2c4a3c", "--graph-label": "#e6f5ee",
-      "--font-ui": "\"SF Mono\", ui-monospace, \"Cascadia Code\", monospace", "--radius-scale": "0.4",
-    },
-  },
-  {
-    name: "Paper", blurb: "Warm light · ink on cream · serif",
-    tokens: {
-      "--bg": "#f3efe6", "--surface-1": "#ffffff", "--surface-2": "#faf5ec", "--glass": "#fbf8f1",
-      "--border": "#e1d8c7", "--surface-hover": "#efe9db", "--accent": "#b5632a", "--selection-bg": "#e7c9a8",
-      "--text": "#2c261d", "--text-dim": "#6b6051", "--reader-bg": "#faf5ec", "--reader-text": "#3a3328",
-      "--graph-edge": "#cbbfa8", "--graph-label": "#2c261d", "--font-ui": "Georgia, \"Times New Roman\", serif",
-      "--shadow-2": "0 6px 20px rgba(0,0,0,0.10)",
-    },
-  },
-  {
-    name: "Sakura Noir", blurb: "Dark plum · petal rose",
-    tokens: {
-      "--bg": "#160f1a", "--surface-1": "#1f1726", "--surface-2": "#281d30", "--glass": "#180f1d",
-      "--border": "#352741", "--surface-hover": "#2c2038", "--accent": "#f06a9a", "--selection-bg": "#f06a9a",
-      "--text": "#f6ecf2", "--text-dim": "#c5aec0", "--reader-bg": "#1f1726", "--reader-text": "#e3ceda",
-      "--graph-edge": "#4a3554", "--graph-label": "#f6ecf2",
-    },
-  },
-  {
-    name: "Deep Sea", blurb: "Abyss navy · bioluminescent cyan",
-    tokens: {
-      "--bg": "#0a1320", "--surface-1": "#121d2e", "--surface-2": "#182638", "--glass": "#0c1623",
-      "--border": "#243750", "--surface-hover": "#1c2c42", "--accent": "#3ec5e0", "--selection-bg": "#3ec5e0",
-      "--text": "#e8f2f8", "--text-dim": "#a3bdcf", "--reader-bg": "#121d2e", "--reader-text": "#cfe2ee",
-      "--graph-edge": "#2e4a63", "--graph-label": "#e8f2f8",
-    },
-  },
-  {
-    name: "Midnight Oil", blurb: "Pitch black · platinum chrome",
-    tokens: {
-      "--bg": "#080809", "--surface-1": "#101014", "--surface-2": "#18181e", "--glass": "#0a0a0e",
-      "--border": "#22222c", "--surface-hover": "#1c1c26", "--accent": "#b0b8d0", "--selection-bg": "#7880a0",
-      "--text": "#f8f8fa", "--text-dim": "#8888a0", "--reader-bg": "#101014", "--reader-text": "#c0c0d4",
-      "--graph-edge": "#2c2c3c", "--graph-label": "#f8f8fa", "--radius-scale": "0.6",
-    },
-  },
-  {
-    name: "Copper Patina", blurb: "Teal slate · molten copper",
-    tokens: {
-      "--bg": "#0c1218", "--surface-1": "#121c26", "--surface-2": "#182432", "--glass": "#0d141e",
-      "--border": "#1e2e3c", "--surface-hover": "#1a2a3a", "--accent": "#d4845a", "--selection-bg": "#b86840",
-      "--text": "#e6eef5", "--text-dim": "#88aabb", "--reader-bg": "#121c26", "--reader-text": "#c4dae8",
-      "--graph-edge": "#28404e", "--graph-label": "#e6eef5",
-    },
-  },
-  {
-    name: "Neon Dusk", blurb: "Smoke purple · electric violet",
-    tokens: {
-      "--bg": "#10101a", "--surface-1": "#17172a", "--surface-2": "#1e1e36", "--glass": "#12101e",
-      "--border": "#2a2848", "--surface-hover": "#22203c", "--accent": "#a855f7", "--selection-bg": "#7c3aed",
-      "--text": "#f0ecff", "--text-dim": "#a8a0cc", "--reader-bg": "#17172a", "--reader-text": "#d0c8ee",
-      "--graph-edge": "#3a3660", "--graph-label": "#f0ecff",
-    },
-  },
-  {
-    name: "Ivory", blurb: "Warm ivory · charcoal serif",
-    tokens: {
-      "--bg": "#f8f4ee", "--surface-1": "#ffffff", "--surface-2": "#f4efe6", "--glass": "#faf8f2",
-      "--border": "#ddd6c8", "--surface-hover": "#ece6da", "--accent": "#3d4a5a", "--selection-bg": "#c0d0e0",
-      "--text": "#252018", "--text-dim": "#665a4e", "--reader-bg": "#f4efe6", "--reader-text": "#342a22",
-      "--graph-edge": "#bdb4a8", "--graph-label": "#252018",
-      "--font-ui": "Georgia, \"Times New Roman\", serif", "--shadow-2": "0 6px 20px rgba(0,0,0,0.10)",
-    },
-  },
-];
+// ── Curated presets ──
+// Mock presets list is removed; presets are loaded directly from the database theme_presets table.
+export const THEME_PRESETS: ThemePreset[] = [];
 
 // ── CSS export - all current token overrides as a :root block ──
 export function themeToCss(tokens: Record<string, string>): string {

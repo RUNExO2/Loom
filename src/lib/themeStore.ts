@@ -23,9 +23,10 @@ import {
   ThemePref, Resolved, BackgroundConfig,
   getThemePref, setThemePref as persistThemePref, resolveTheme, applyResolvedTheme,
   getAccentPref, setAccentPref as persistAccentPref, applyAccent,
-  getBackgroundConfig, setBackgroundConfig,
+  getBackgroundConfig, setBackgroundConfig, DEFAULT_BG_CONFIG, themeFamily,
 } from "./settings";
-import { CustomTheme, getCustomThemeState, activeTheme, applyThemeFilter, reloadCustomCss } from "./theme";
+import { CustomTheme, getCustomThemeState, activeTheme, applyThemeFilter, reloadCustomCss, MANAGED_VAR_KEYS } from "./theme";
+import { derivePalette } from "./palette";
 
 export interface ThemeStoreState {
   themePref: ThemePref;          // "system" or a THEMES id
@@ -36,7 +37,15 @@ export interface ThemeStoreState {
   bg: BackgroundConfig;
 }
 
-const DEFAULT_BG: BackgroundConfig = { bgImage: null, bgDynamic: true, bgUseColors: true, bgParallax: true, profile: null };
+const DEFAULT_BG: BackgroundConfig = { ...DEFAULT_BG_CONFIG };
+
+// Map a fit mode to the (background-size, background-position) pair CSS needs.
+const FIT_CSS: Record<string, { size: string; pos: string }> = {
+  cover:   { size: "cover",      pos: "center" },
+  contain: { size: "contain",   pos: "center" },
+  fill:    { size: "100% 100%", pos: "center" },
+  center:  { size: "auto",      pos: "center" },
+};
 
 let state: ThemeStoreState = {
   themePref: "dark", resolved: "dark", accent: "violet",
@@ -87,19 +96,17 @@ function renderCombined() {
   // 1. Clear readability/blur/overlay variables
   const clearVars = [
     "--bg-img", "--bg-overlay", "--bg-blur",
+    "--bgi-size", "--bgi-pos", "--bgi-blur", "--bgi-bright", "--bgi-contrast", "--bgi-sat", "--bgi-opacity",
+    "--accent-l", "--accent-c", "--accent-h", "--text-on-accent",
     "--region-blur-nav", "--region-blur-card", "--region-blur-modal",
     "--region-overlay-nav", "--region-overlay-card", "--region-overlay-modal",
   ];
   clearVars.forEach((k) => root.removeProperty(k));
 
-  // 2. Clear all custom theme variable keys
-  const themeKeys = [
-    "--font-ui", "--ui-scale", "--ui-weight",
-    "--radius-scale", "--shadow-2",
-    "--bg", "--accent", "--surface-1", "--surface-2", "--glass", "--border",
-    "--text", "--text-dim", "--surface-hover", "--selection-bg",
-    "--graph-edge", "--graph-label", "--reader-bg", "--reader-text",
-  ];
+  // 2. Clear all custom theme variable keys. Derived from the schema (MANAGED_VAR_KEYS)
+  // so a new Theme Studio control auto-applies and auto-clears here — no parallel list to
+  // keep in sync. Effects (FX_KEYS) are excluded; they compose a filter elsewhere.
+  const themeKeys = MANAGED_VAR_KEYS;
   themeKeys.forEach((k) => root.removeProperty(k));
 
   // 3. Apply background parallax & dataset.bg
@@ -129,7 +136,18 @@ function renderCombined() {
       const cssUrl = convertedUrl.replace(/\\/g, "/").replace(/"/g, "%22");
       root.setProperty("--bg-img", `url("${cssUrl}")`);
 
-      // Apply readability cssVars if bgDynamic is true and profile exists
+      // Manual image controls — independent of analysis, applied as a filter on
+      // #loom-bg-engine. Defaults keep the image untouched (1 = identity, 0 blur).
+      const fit = FIT_CSS[bg.fit] ?? FIT_CSS.cover;
+      root.setProperty("--bgi-size", fit.size);
+      root.setProperty("--bgi-pos", fit.pos);
+      root.setProperty("--bgi-blur", `${bg.blur ?? 0}px`);
+      root.setProperty("--bgi-bright", `${bg.brightness ?? 1}`);
+      root.setProperty("--bgi-contrast", `${bg.contrast ?? 1}`);
+      root.setProperty("--bgi-sat", `${bg.saturation ?? 1}`);
+      root.setProperty("--bgi-opacity", `${bg.opacity ?? 1}`);
+
+      // Readability cssVars (scrim + acrylic) are a separate, optional layer.
       if (bg.profile && bg.bgDynamic) {
         for (const [k, v] of Object.entries(bg.profile.cssVars)) root.setProperty(k, v);
       }
@@ -143,13 +161,22 @@ function renderCombined() {
     if (v != null && v !== "") root.setProperty(k, v);
   }
 
-  // 5. Apply Background Colors if enabled and not overridden by custom theme
+  // 5. Apply the generated palette — accessible (WCAG-checked) and theme-family-aware,
+  // so dark/light surface variants adapt when the theme changes. Custom-theme tokens win.
   if (bg.bgImage && bg.profile && bg.bgUseColors) {
-    const primary = bg.profile.colors.primary;
-    const surfaceTint = bg.profile.colors.surfaceTint;
-    if (themeTokens["--accent"] == null || themeTokens["--accent"] === "") root.setProperty("--accent", primary);
-    if (themeTokens["--selection-bg"] == null || themeTokens["--selection-bg"] === "") root.setProperty("--selection-bg", primary);
-    if (themeTokens["--surface-1"] == null || themeTokens["--surface-1"] === "") root.setProperty("--surface-1", surfaceTint);
+    const pal = derivePalette(bg.profile.colors.primary, bg.profile.colors.dominant, themeFamily(state.resolved));
+    const free = (k: string) => themeTokens[k] == null || themeTokens[k] === "";
+    if (free("--accent")) {
+      // Drive the OKLCH component system so --accent-soft/-line/-text/-hover stay in sync.
+      root.setProperty("--accent-l", String(pal.accent.l));
+      root.setProperty("--accent-c", String(pal.accent.c));
+      root.setProperty("--accent-h", String(pal.accent.h));
+      root.setProperty("--text-on-accent", pal.onAccent);
+    }
+    if (free("--selection-bg")) root.setProperty("--selection-bg", pal.accentHex);
+    if (free("--surface-1")) root.setProperty("--surface-1", pal.surface1);
+    if (free("--surface-2")) root.setProperty("--surface-2", pal.surface2);
+    if (free("--graph-edge")) root.setProperty("--graph-edge", pal.graphEdge);
   }
 
   // 6. Effects filter (blur/brightness/…) — composed onto #root, not <html>.
@@ -198,10 +225,18 @@ function setCustomTheme(theme: CustomTheme | null, enabled: boolean) {
   broadcast({ kind: "custom", theme, enabled });
 }
 
+// Apply is instant (CSS vars), persist + cross-window broadcast are debounced so a
+// slider drag doesn't hammer SQLite or spam other windows — only the settled value
+// is written. ponytail: 150ms trailing debounce, plenty for a drag; raise if writes still pile up.
+let bgPersistTimer: ReturnType<typeof setTimeout> | null = null;
 function setBackground(cfg: BackgroundConfig) {
   applyBackgroundLocal(cfg);
-  persist(setBackgroundConfig(cfg));
-  broadcast({ kind: "background", bg: cfg });
+  if (bgPersistTimer) clearTimeout(bgPersistTimer);
+  bgPersistTimer = setTimeout(() => {
+    bgPersistTimer = null;
+    persist(setBackgroundConfig(cfg));
+    broadcast({ kind: "background", bg: cfg });
+  }, 150);
 }
 
 // Re-read the Custom CSS folder here and tell every other window to do the same.

@@ -6,9 +6,10 @@
 export interface BackgroundProfile {
   cssVars: Record<string, string>;
   colors: {
-    primary: string;
-    secondary: string;
+    primary: string;     // most vibrant accent
+    secondary: string;   // second accent (distinct hue)
     surfaceTint: string;
+    dominant?: string;   // most frequent color (quantized) — optional for old profiles
   };
   luminance: number;
 }
@@ -152,13 +153,21 @@ export async function processBackground(imageUrl: string): Promise<BackgroundPro
               
               const pixelCount = data.length / 4;
               const luminances = new Float32Array(pixelCount);
-              
+
+              // Dominant color via a coarse 12-bit (16³) histogram — most populated bucket wins.
+              const hist = new Int32Array(4096);
+              let domKey = 0, domCount = -1;
+
               for (let i = 0, p = 0; i < data.length; i += 4, p++) {
                 const r = data[i];
                 const g = data[i+1];
                 const b = data[i+2];
-                
+
                 rSum += r; gSum += g; bSum += b;
+
+                const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+                const cnt = ++hist[key];
+                if (cnt > domCount) { domCount = cnt; domKey = key; }
                 
                 // Luminance calculation
                 const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
@@ -219,7 +228,8 @@ export async function processBackground(imageUrl: string): Promise<BackgroundPro
               const primary = rgbToHex(vibrant1[0], vibrant1[1], vibrant1[2]);
               const secondary = rgbToHex(vibrant2[0], vibrant2[1], vibrant2[2]);
               const surfaceTint = rgbToHex(surfaceRgb[0], surfaceRgb[1], surfaceRgb[2]);
-              
+              const dominant = rgbToHex(((domKey >> 8) & 15) * 16 + 8, ((domKey >> 4) & 15) * 16 + 8, (domKey & 15) * 16 + 8);
+
               // Readability Engine Adjustments
               // Average luminance is 0 to 1.
               // If > 0.5, image is quite bright. We need strong dark overlays to read white text.
@@ -252,7 +262,7 @@ export async function processBackground(imageUrl: string): Promise<BackgroundPro
               self.postMessage({
                 result: {
                   cssVars,
-                  colors: { primary, secondary, surfaceTint },
+                  colors: { primary, secondary, surfaceTint, dominant },
                   luminance: avgLuminance
                 }
               });
@@ -312,13 +322,20 @@ function runExtractionSync(data: Uint8ClampedArray): BackgroundProfile {
   
   const pixelCount = data.length / 4;
   const luminances = new Float32Array(pixelCount);
-  
+
+  const hist = new Int32Array(4096);
+  let domKey = 0, domCount = -1;
+
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i];
     const g = data[i+1];
     const b = data[i+2];
-    
+
     rSum += r; gSum += g; bSum += b;
+
+    const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+    const cnt = ++hist[key];
+    if (cnt > domCount) { domCount = cnt; domKey = key; }
     
     const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     totalLuminance += lum;
@@ -369,7 +386,8 @@ function runExtractionSync(data: Uint8ClampedArray): BackgroundProfile {
   const primary = rgbToHex(vibrant1[0], vibrant1[1], vibrant1[2]);
   const secondary = rgbToHex(vibrant2[0], vibrant2[1], vibrant2[2]);
   const surfaceTint = rgbToHex(surfaceRgb[0], surfaceRgb[1], surfaceRgb[2]);
-  
+  const dominant = rgbToHex(((domKey >> 8) & 15) * 16 + 8, ((domKey >> 4) & 15) * 16 + 8, (domKey & 15) * 16 + 8);
+
   let baseBlur = 12;
   if (stdDev > 0.2) baseBlur += 16;
   if (avgLuminance > 0.6) baseBlur += 8;
@@ -392,7 +410,7 @@ function runExtractionSync(data: Uint8ClampedArray): BackgroundProfile {
   
   return {
     cssVars,
-    colors: { primary, secondary, surfaceTint },
+    colors: { primary, secondary, surfaceTint, dominant },
     luminance: avgLuminance
   };
 }

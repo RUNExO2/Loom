@@ -3,7 +3,7 @@ use rusqlite::{Connection, Result};
 // Current logical schema version. Bump when a structural migration is added below.
 // Tracked via SQLite's PRAGMA user_version so a migration runs at most once and an
 // imported/restored DB can be checked for compatibility.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 // Idempotent "ADD COLUMN" that swallows ONLY the benign "column already exists" case
 // and propagates everything else (locked DB, disk error, syntax) instead of `let _ =`
@@ -337,6 +337,42 @@ pub fn setup_schema(conn: &Connection) -> Result<()> {
         );"#,
         []
     );
+
+    // Soft-migration: Create the theme_presets table in existing DBs
+    let _ = conn.execute(
+        r#"CREATE TABLE IF NOT EXISTS theme_presets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            blurb TEXT NOT NULL DEFAULT '',
+            tokens TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );"#,
+        []
+    );
+
+    let presets_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM theme_presets", [], |r| r.get(0))
+        .unwrap_or(0);
+    if presets_count == 0 {
+        let defaults = vec![
+            ("obsidian_bloom", "Obsidian Bloom", "Ink violet - the house look", "{\"--bg\":\"#141019\",\"--surface-1\":\"#1d1726\",\"--surface-2\":\"#251d31\",\"--glass\":\"#17111f\",\"--border\":\"#33293f\",\"--surface-hover\":\"#2a2138\",\"--accent\":\"#8b5cf6\",\"--selection-bg\":\"#8b5cf6\",\"--text\":\"#f4f1f8\",\"--text-dim\":\"#bdb4c9\",\"--reader-bg\":\"#1d1726\",\"--reader-text\":\"#d6cfe0\",\"--graph-edge\":\"#46395a\",\"--graph-label\":\"#f4f1f8\"}"),
+            ("solar_ember", "Solar Ember", "Warm charcoal - molten amber", "{\"--bg\":\"#17120d\",\"--surface-1\":\"#211a13\",\"--surface-2\":\"#2a2119\",\"--glass\":\"#1a140e\",\"--border\":\"#3a2c1f\",\"--surface-hover\":\"#30251b\",\"--accent\":\"#f0883e\",\"--selection-bg\":\"#e0742a\",\"--text\":\"#f7efe6\",\"--text-dim\":\"#cbbaa6\",\"--reader-bg\":\"#211a13\",\"--reader-text\":\"#e2d4c2\",\"--graph-edge\":\"#5a4631\",\"--graph-label\":\"#f7efe6\",\"--font-ui\":\"Georgia, \\\"Times New Roman\\\", serif\"}"),
+            ("mint_terminal", "Mint Terminal", "Near-black - phosphor green - mono", "{\"--bg\":\"#090d0b\",\"--surface-1\":\"#111714\",\"--surface-2\":\"#16201b\",\"--glass\":\"#0c1210\",\"--border\":\"#1f2e26\",\"--surface-hover\":\"#18241d\",\"--accent\":\"#46e0a0\",\"--selection-bg\":\"#46e0a0\",\"--text\":\"#e6f5ee\",\"--text-dim\":\"#9fc4b3\",\"--reader-bg\":\"#111714\",\"--reader-text\":\"#cde8db\",\"--graph-edge\":\"#2c4a3c\",\"--graph-label\":\"#e6f5ee\",\"--font-ui\":\"\\\"SF Mono\\\", ui-monospace, \\\"Cascadia Code\\\", monospace\",\"--radius-scale\":\"0.4\"}"),
+            ("paper", "Paper", "Warm light - ink on cream - serif", "{\"--bg\":\"#f3efe6\",\"--surface-1\":\"#ffffff\",\"--surface-2\":\"#faf5ec\",\"--glass\":\"#fbf8f1\",\"--border\":\"#e1d8c7\",\"--surface-hover\":\"#efe9db\",\"--accent\":\"#b5632a\",\"--selection-bg\":\"#e7c9a8\",\"--text\":\"#2c261d\",\"--text-dim\":\"#6b6051\",\"--reader-bg\":\"#faf5ec\",\"--reader-text\":\"#3a3328\",\"--graph-edge\":\"#cbbfa8\",\"--graph-label\":\"#2c261d\",\"--font-ui\":\"Georgia, \\\"Times New Roman\\\", serif\",\"--shadow-2\":\"0 6px 20px rgba(0,0,0,0.10)\"}"),
+            ("sakura_noir", "Sakura Noir", "Dark plum - petal rose", "{\"--bg\":\"#160f1a\",\"--surface-1\":\"#1f1726\",\"--surface-2\":\"#281d30\",\"--glass\":\"#180f1d\",\"--border\":\"#352741\",\"--surface-hover\":\"#2c2038\",\"--accent\":\"#f06a9a\",\"--selection-bg\":\"#f06a9a\",\"--text\":\"#f6ecf2\",\"--text-dim\":\"#c5aec0\",\"--reader-bg\":\"#1f1726\",\"--reader-text\":\"#e3ceda\",\"--graph-edge\":\"#4a3554\",\"--graph-label\":\"#f6ecf2\"}"),
+            ("deep_sea", "Deep Sea", "Abyss navy - bioluminescent cyan", "{\"--bg\":\"#0a1320\",\"--surface-1\":\"#121d2e\",\"--surface-2\":\"#182638\",\"--glass\":\"#0c1623\",\"--border\":\"#243750\",\"--surface-hover\":\"#1c2c42\",\"--accent\":\"#3ec5e0\",\"--selection-bg\":\"#3ec5e0\",\"--text\":\"#e8f2f8\",\"--text-dim\":\"#a3bdcf\",\"--reader-bg\":\"#121d2e\",\"--reader-text\":\"#cfe2ee\",\"--graph-edge\":\"#2e4a63\",\"--graph-label\":\"#e8f2f8\"}"),
+            ("midnight_oil", "Midnight Oil", "Pitch black - platinum chrome", "{\"--bg\":\"#080809\",\"--surface-1\":\"#101014\",\"--surface-2\":\"#18181e\",\"--glass\":\"#0a0a0e\",\"--border\":\"#22222c\",\"--surface-hover\":\"#1c1c26\",\"--accent\":\"#b0b8d0\",\"--selection-bg\":\"#7880a0\",\"--text\":\"#f8f8fa\",\"--text-dim\":\"#8888a0\",\"--reader-bg\":\"#101014\",\"--reader-text\":\"#c0c0d4\",\"--graph-edge\":\"#2c2c3c\",\"--graph-label\":\"#f8f8fa\",\"--radius-scale\":\"0.6\"}"),
+            ("copper_patina", "Copper Patina", "Teal slate - molten copper", "{\"--bg\":\"#0c1218\",\"--surface-1\":\"#121c26\",\"--surface-2\":\"#182432\",\"--glass\":\"#0d141e\",\"--border\":\"#1e2e3c\",\"--surface-hover\":\"#1a2a3a\",\"--accent\":\"#d4845a\",\"--selection-bg\":\"#b86840\",\"--text\":\"#e6eef5\",\"--text-dim\":\"#88aabb\",\"--reader-bg\":\"#121c26\",\"--reader-text\":\"#c4dae8\",\"--graph-edge\":\"#28404e\",\"--graph-label\":\"#e6eef5\"}"),
+            ("neon_dusk", "Neon Dusk", "Smoke purple - electric violet", "{\"--bg\":\"#10101a\",\"--surface-1\":\"#17172a\",\"--surface-2\":\"#1e1e36\",\"--glass\":\"#12101e\",\"--border\":\"#2a2848\",\"--surface-hover\":\"#22203c\",\"--accent\":\"#a855f7\",\"--selection-bg\":\"#7c3aed\",\"--text\":\"#f0ecff\",\"--text-dim\":\"#a8a0cc\",\"--reader-bg\":\"#17172a\",\"--reader-text\":\"#d0c8ee\",\"--graph-edge\":\"#3a3660\",\"--graph-label\":\"#f0ecff\"}"),
+            ("ivory", "Ivory", "Warm ivory - charcoal serif", "{\"--bg\":\"#f8f4ee\",\"--surface-1\":\"#ffffff\",\"--surface-2\":\"#f4efe6\",\"--glass\":\"#faf8f2\",\"--border\":\"#ddd6c8\",\"--surface-hover\":\"#ece6da\",\"--accent\":\"#3d4a5a\",\"--selection-bg\":\"#c0d0e0\",\"--text\":\"#252018\",\"--text-dim\":\"#665a4e\",\"--reader-bg\":\"#f4efe6\",\"--reader-text\":\"#342a22\",\"--graph-edge\":\"#bdb4a8\",\"--graph-label\":\"#252018\",\"--font-ui\":\"Georgia, \\\"Times New Roman\\\", serif\"}"),
+        ];
+        for (id, name, blurb, tokens) in defaults {
+            let _ = conn.execute(
+                "INSERT INTO theme_presets (id, name, blurb, tokens) VALUES (?1, ?2, ?3, ?4)",
+                [id, name, blurb, tokens],
+            );
+        }
+    }
 
     // Stamp the schema version. Idempotent: existing DBs at version 0 (pre-stamp)
     // are brought up to the current version after the soft-migrations above run.

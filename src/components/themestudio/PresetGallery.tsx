@@ -1,16 +1,31 @@
 import { I } from "../../lib/context";
-import { THEME_PRESETS, ThemePreset, themeSwatch } from "../../lib/theme";
+import { ThemePreset, themeSwatch } from "../../lib/theme";
 
-// Curated preset cards — one click applies a complete look (confirmed in state.applyPreset).
-export function PresetGallery({ onApply }: { onApply: (p: ThemePreset) => void }) {
+// Curated preset cards — loaded from SQLite database, selecting one activates it.
+export function PresetGallery({
+  presets,
+  activeId,
+  onSelect,
+}: {
+  presets: ThemePreset[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+}) {
   return (
     <div className="ts-group" style={{ marginTop: 10 }}>
       <div className="ts-group-h"><I n="ph-stack" /> Presets</div>
       <div className="ts-presets">
-        {THEME_PRESETS.map((p) => {
+        {presets.map((p) => {
           const sw = themeSwatch(p.tokens);
+          const isActive = p.id === activeId;
           return (
-            <button key={p.name} className="ts-preset" onClick={() => onApply(p)} title={`Apply "${p.name}"`}>
+            <button
+              key={p.id}
+              className={`ts-preset ${isActive ? "active" : ""}`}
+              onClick={() => onSelect(p.id)}
+              title={`Select "${p.name}"`}
+              style={isActive ? { borderColor: "var(--accent)", background: "var(--surface-hover)" } : undefined}
+            >
               <div className="ts-preset-pal">
                 <div style={{ background: sw.bg }} />
                 <div style={{ background: sw.surface }} />
@@ -18,7 +33,7 @@ export function PresetGallery({ onApply }: { onApply: (p: ThemePreset) => void }
                 <div style={{ background: sw.text }} />
               </div>
               <div className="ts-preset-nm">{p.name}</div>
-              <div className="ts-preset-bl">{p.blurb}</div>
+              <div className="ts-preset-bl">{p.blurb || "Custom theme"}</div>
             </button>
           );
         })}

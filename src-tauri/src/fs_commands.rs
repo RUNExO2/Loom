@@ -1808,8 +1808,8 @@ pub async fn bg_import_image(app_handle: tauri::AppHandle, src: String) -> Resul
     let ext = src_path.extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    if !["jpg", "jpeg", "png", "webp", "avif"].contains(&ext.as_str()) {
-        return Err("Only jpg, jpeg, png, webp images are supported".into());
+    if !["jpg", "jpeg", "png", "webp", "avif", "gif"].contains(&ext.as_str()) {
+        return Err("Only jpg, jpeg, png, webp, gif images are supported".into());
     }
     let backgrounds_dir = get_backgrounds_dir(&app_handle)?;
     // Sanitize to alphanumeric/dash/underscore so the filename is safe in CSS url().
@@ -1826,6 +1826,30 @@ pub async fn bg_import_image(app_handle: tauri::AppHandle, src: String) -> Resul
     let dest = backgrounds_dir.join(&filename);
     fs::copy(src_path, &dest)
         .map_err(|e| format!("Failed to copy background image: {}", e))?;
+    Ok(format!("backgrounds/{}", filename))
+}
+
+/// Write already-decoded image bytes (e.g. a GIF's first frame re-encoded to PNG by
+/// the frontend canvas) into managed storage. Same portable relative path contract as
+/// bg_import_image. Used when the frontend must transcode before storing.
+#[tauri::command]
+pub async fn bg_save_image_bytes(app_handle: tauri::AppHandle, ext: String, bytes: Vec<u8>) -> Result<String, String> {
+    let ext = ext.to_lowercase();
+    if !["png", "jpg", "jpeg", "webp"].contains(&ext.as_str()) {
+        return Err("Unsupported image type".into());
+    }
+    if bytes.is_empty() {
+        return Err("Empty image data".into());
+    }
+    let backgrounds_dir = get_backgrounds_dir(&app_handle)?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let filename = format!("bg_{}.{}", ts, ext);
+    let dest = backgrounds_dir.join(&filename);
+    fs::write(&dest, &bytes)
+        .map_err(|e| format!("Failed to write background image: {}", e))?;
     Ok(format!("backgrounds/{}", filename))
 }
 

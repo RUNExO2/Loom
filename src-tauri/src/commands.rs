@@ -1251,6 +1251,117 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
     }).await.map_err(|e| e.to_string()).and_then(|x| x)
 }
 
+// ── Theme Presets ─────────────────────────────────────────────────────────────
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ThemePreset {
+    pub id: String,
+    pub name: String,
+    pub blurb: String,
+    pub tokens: String,
+}
+
+#[tauri::command]
+pub async fn get_theme_presets(state: State<'_, AppState>) -> Result<Vec<ThemePreset>, String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            let mut stmt = conn.prepare("SELECT id, name, blurb, tokens FROM theme_presets ORDER BY name ASC")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ThemePreset {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    blurb: row.get(2)?,
+                    tokens: row.get(3)?,
+                })
+            }).map_err(|e| e.to_string())?;
+            let mut list = Vec::new();
+            for r in rows {
+                list.push(r.map_err(|e| e.to_string())?);
+            }
+            Ok(list)
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+#[tauri::command]
+pub async fn save_theme_preset(state: State<'_, AppState>, preset: ThemePreset) -> Result<(), String> {
+    // Validate first: reject malformed or injected tokens
+    let tokens_map: std::collections::HashMap<String, serde_json::Value> = serde_json::from_str(&preset.tokens)
+        .map_err(|e| format!("Invalid JSON tokens: {}", e))?;
+    for (k, v) in &tokens_map {
+        if !k.starts_with("--") {
+            return Err(format!("Invalid CSS token key: '{}'. Must start with '--'", k));
+        }
+        let v_str = match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return Err(format!("Token value for '{}' must be a string or number", k)),
+        };
+        if v_str.contains('{') || v_str.contains('}') || v_str.contains(';') {
+            return Err(format!("Invalid characters in token '{}' value: '{}'", k, v_str));
+        }
+    }
+
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            conn.execute(
+                "INSERT INTO theme_presets (id, name, blurb, tokens) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET name = ?2, blurb = ?3, tokens = ?4",
+                [preset.id, preset.name, preset.blurb, preset.tokens],
+            ).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+#[tauri::command]
+pub async fn delete_theme_preset(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            conn.execute("DELETE FROM theme_presets WHERE id = ?", [id])
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+#[tauri::command]
+pub async fn duplicate_theme_preset(state: State<'_, AppState>, id: String, new_id: String, new_name: String) -> Result<(), String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            let (blurb, tokens): (String, String) = conn.query_row(
+                "SELECT blurb, tokens FROM theme_presets WHERE id = ?",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|e| e.to_string())?;
+
+            conn.execute(
+                "INSERT INTO theme_presets (id, name, blurb, tokens) VALUES (?1, ?2, ?3, ?4)",
+                [new_id, new_name, blurb, tokens],
+            ).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
+#[tauri::command]
+pub async fn rename_theme_preset(state: State<'_, AppState>, id: String, new_name: String) -> Result<(), String> {
+    state.db.call(move |conn| {
+        let res = (|| -> Result<_, String> {
+            conn.execute(
+                "UPDATE theme_presets SET name = ?2 WHERE id = ?1",
+                [id, new_name],
+            ).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        Ok(res)
+    }).await.map_err(|e| e.to_string()).and_then(|x| x)
+}
+
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1872,5 +1983,61 @@ mod tests {
             "SELECT status FROM mutation_ledger WHERE command_type='create_item' ORDER BY created_at DESC LIMIT 1",
             [], |r| r.get(0)).unwrap();
         assert_eq!(status, "COMMITTED", "successful mutation stamps COMMITTED in the same txn");
+    }
+
+    #[test]
+    fn test_theme_presets_db_operations() {
+        let conn = setup_test_db();
+        
+        // 1. Verify seeding: at least 10 default presets should be inserted
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM theme_presets", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 10);
+
+        // 2. Verify we can select obsidian_bloom
+        let (name, tokens): (String, String) = conn.query_row(
+            "SELECT name, tokens FROM theme_presets WHERE id = 'obsidian_bloom'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?))
+        ).unwrap();
+        assert_eq!(name, "Obsidian Bloom");
+        assert!(tokens.contains("--bg"));
+
+        // 3. Test insert new preset
+        conn.execute(
+            "INSERT INTO theme_presets (id, name, blurb, tokens) VALUES (?1, ?2, ?3, ?4)",
+            ["custom_test_theme", "Custom Test", "A test theme", "{\"--bg\":\"#123456\"}"],
+        ).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM theme_presets", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 11);
+
+        // 4. Test duplicate preset
+        let (blurb, tokens): (String, String) = conn.query_row(
+            "SELECT blurb, tokens FROM theme_presets WHERE id = 'custom_test_theme'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO theme_presets (id, name, blurb, tokens) VALUES (?1, ?2, ?3, ?4)",
+            ["custom_test_theme_copy", "Custom Test copy", &blurb, &tokens],
+        ).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM theme_presets", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 12);
+
+        // 5. Test rename preset
+        conn.execute(
+            "UPDATE theme_presets SET name = ?2 WHERE id = ?1",
+            ["custom_test_theme", "Renamed Test Theme"],
+        ).unwrap();
+        let name: String = conn.query_row(
+            "SELECT name FROM theme_presets WHERE id = 'custom_test_theme'",
+            [],
+            |r| r.get(0)
+        ).unwrap();
+        assert_eq!(name, "Renamed Test Theme");
+
+        // 6. Test delete preset
+        conn.execute("DELETE FROM theme_presets WHERE id = 'custom_test_theme'", []).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM theme_presets", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 11);
     }
 }

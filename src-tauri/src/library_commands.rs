@@ -41,22 +41,46 @@ struct OpenLibraryDoc {
     cover_i: Option<u64>,
 }
 
+// Movies — community IMDb mirror. Apple removed video from the iTunes Search API
+// (movie/tvSeason queries now return 0), and TMDB/OMDb both require an API key, so this
+// keyless endpoint is the only no-key movie-poster source. Rows look like
+// { "#TITLE": "...", "#IMG_POSTER": "https://m.media-amazon.com/.../._V1_.jpg" }.
 #[derive(Deserialize, Debug)]
-struct ItunesResponse {
-    results: Vec<ItunesResult>,
+struct ImdbResponse {
+    #[serde(default)]
+    description: Vec<ImdbRow>,
+}
+#[derive(Deserialize, Debug)]
+struct ImdbRow {
+    #[serde(rename = "#TITLE")]
+    title: Option<String>,
+    #[serde(rename = "#IMG_POSTER")]
+    poster: Option<String>,
 }
 
+// TV — TVMaze: keyless, official, returns portrait show posters. Response is a bare
+// array of { show: { name, image: { medium, original } } }.
 #[derive(Deserialize, Debug)]
-struct ItunesResult {
-    #[serde(alias = "trackName", alias = "collectionName")]
-    name: Option<String>,
-    #[serde(alias = "artworkUrl100", alias = "artworkUrl512")]
-    artwork: Option<String>,
+struct TvMazeWrap {
+    show: TvMazeShow,
+}
+#[derive(Deserialize, Debug)]
+struct TvMazeShow {
+    name: String,
+    image: Option<TvMazeImage>,
+}
+#[derive(Deserialize, Debug)]
+struct TvMazeImage {
+    original: Option<String>,
+    medium: Option<String>,
 }
 
+// Games — Steam Community SearchApps. NOTE: appid comes back as a JSON *string*
+// (`"appid":"620"`), not a number — declaring it u64 made every game search fail to
+// parse. Keep it a String.
 #[derive(Deserialize, Debug)]
 struct SteamApp {
-    appid: u64,
+    appid: String,
     name: String,
 }
 
@@ -130,31 +154,41 @@ pub async fn fetch_cover_candidates(query: String, media_type: String, page: Opt
             }
         }
         "movie" => {
-            let offset = (page - 1) * 10;
-            let url = format!("https://itunes.apple.com/search?term={}&entity=movie&limit=10&offset={}", urlencoding::encode(&query), offset);
+            // Keyless IMDb mirror. It returns the full match set in one response (no
+            // server paging), so we slice client-side to match the picker's "next set".
+            // ponytail: single community endpoint — if it goes down, swap to TMDB with a
+            // user-supplied key; the candidate shape ({url,title}) stays identical.
+            let url = format!("https://imdb.iamidiotareyoutoo.com/search?q={}", urlencoding::encode(&query));
             let body = get_text(&client, &url).await?;
-            let json: ItunesResponse = serde_json::from_str(&body)
-                .map_err(|e| format!("iTunes response could not be parsed: {e}"))?;
-            for result in json.results {
-                if let (Some(name), Some(artwork)) = (result.name, result.artwork) {
-                    candidates.push(CoverCandidate { url: artwork.replace("100x100bb", "600x600bb"), title: name });
+            let json: ImdbResponse = serde_json::from_str(&body)
+                .map_err(|e| format!("Movie provider response could not be parsed: {e}"))?;
+            let start = ((page - 1) * 10) as usize;
+            for row in json.description.into_iter().skip(start).take(10) {
+                if let (Some(title), Some(poster)) = (row.title, row.poster) {
+                    if !poster.is_empty() {
+                        candidates.push(CoverCandidate { url: poster, title });
+                    }
                 }
             }
         }
         "tv" => {
-            let offset = (page - 1) * 10;
-            let url = format!("https://itunes.apple.com/search?term={}&entity=tvSeason&limit=10&offset={}", urlencoding::encode(&query), offset);
+            // TVMaze returns up to ~10 shows in one call; slice client-side for paging.
+            let url = format!("https://api.tvmaze.com/search/shows?q={}", urlencoding::encode(&query));
             let body = get_text(&client, &url).await?;
-            let json: ItunesResponse = serde_json::from_str(&body)
-                .map_err(|e| format!("iTunes response could not be parsed: {e}"))?;
-            for result in json.results {
-                if let (Some(name), Some(artwork)) = (result.name, result.artwork) {
-                    candidates.push(CoverCandidate { url: artwork.replace("100x100bb", "600x600bb"), title: name });
+            let shows: Vec<TvMazeWrap> = serde_json::from_str(&body)
+                .map_err(|e| format!("TVMaze response could not be parsed: {e}"))?;
+            let start = ((page - 1) * 10) as usize;
+            for wrap in shows.into_iter().skip(start).take(10) {
+                if let Some(img) = wrap.show.image {
+                    // original is full-res portrait; medium is the fallback.
+                    if let Some(u) = img.original.or(img.medium) {
+                        candidates.push(CoverCandidate { url: u, title: wrap.show.name });
+                    }
                 }
             }
         }
         "game" => {
-            // Steam Community search - free, no key, returns appid + name.
+            // Steam Community search - free, no key, returns appid (as a string) + name.
             // library_600x900.jpg is the 2:3 portrait capsule, ideal for card UI.
             let url = format!("https://steamcommunity.com/actions/SearchApps/{}", urlencoding::encode(&query));
             let body = get_text(&client, &url).await?;
@@ -181,9 +215,16 @@ pub async fn fetch_cover_candidates(query: String, media_type: String, page: Opt
 #[tauri::command]
 pub async fn download_and_cache_cover(app_handle: AppHandle, url: String) -> Result<String, String> {
     let covers_dir = get_covers_dir(&app_handle)?;
-    let client = reqwest::Client::new();
-    
+    // A UA is required: the Amazon image CDN (movie posters) 403s requests without one.
+    let client = reqwest::Client::builder()
+        .user_agent("LOOM/1.0 (media library)")
+        .build()
+        .map_err(|e| e.to_string())?;
+
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Cover download failed (HTTP {}).", resp.status().as_u16()));
+    }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     
     let ext = if url.to_lowercase().ends_with(".png") { "png" } else { "jpg" };

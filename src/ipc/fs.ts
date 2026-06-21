@@ -65,6 +65,10 @@ export const fsWriteAnyFile = (path: string, content: string) =>
 export const bgImportImage = (src: string) =>
   apiInvoke<string>("bg_import_image", { src });
 
+/** Write decoded image bytes (e.g. a GIF's frozen first frame) into managed storage. */
+export const bgSaveImageBytes = (ext: string, bytes: number[]) =>
+  apiInvoke<string>("bg_save_image_bytes", { ext, bytes });
+
 /** Resolve a relative managed path ("backgrounds/foo.jpg") to an absolute path for convertFileSrc. */
 export const bgResolvePath = (rel: string) =>
   apiInvoke<string>("bg_resolve_path", { rel });

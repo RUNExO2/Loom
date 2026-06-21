@@ -64,3 +64,25 @@ export const getDashboardLayout = (workspaceId: string) =>
 
 export const saveDashboardLayout = (workspaceId: string, widgets: DashboardWidget[]) =>
   apiInvoke<void>("save_dashboard_layout", { workspaceId, widgets });
+
+export interface ThemePreset {
+  id: string;
+  name: string;
+  blurb: string;
+  tokens: string; // JSON string
+}
+
+export const getThemePresets = () =>
+  apiInvoke<ThemePreset[]>("get_theme_presets");
+
+export const saveThemePreset = (preset: ThemePreset) =>
+  apiInvoke<void>("save_theme_preset", { preset });
+
+export const deleteThemePreset = (id: string) =>
+  apiInvoke<void>("delete_theme_preset", { id });
+
+export const duplicateThemePreset = (id: string, newId: string, newName: string) =>
+  apiInvoke<void>("duplicate_theme_preset", { id, newId, newName });
+
+export const renameThemePreset = (id: string, newName: string) =>
+  apiInvoke<void>("rename_theme_preset", { id, newName });
